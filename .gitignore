@@ -1,0 +1,30 @@
+# Gradle
+.gradle/
+build/
+app/build/
+.kotlin/
+
+# IDE
+.idea/
+*.iml
+.navigation/
+
+# Android Studio local properties
+local.properties
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.apk
+*.aab
+*.dex
+*.class
+
+# Scratch & temporary patch files
+/*_prev_*.txt
+/*.class
+/patch_circle_crop.py
+/patch_frost_blur.py
+/ui_redesign_*.png

@@ -1,0 +1,11 @@
+<resources>
+    <style name="IntegralTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:forceDarkAllowed">false</item>
+        <item name="android:windowBackground">#FF080809</item>
+        <item name="android:statusBarColor">#FF121214</item>
+        <item name="android:navigationBarColor">#FF080809</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:colorAccent">#FFB300</item>
+    </style>
+</resources>

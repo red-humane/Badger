@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Badger</string>
+    <string name="accessibility_description">Badger listens for the Badge key. When pressed, the chosen action may read visible accessibility text to find copyable details or translate the screen. Screen text is processed on-device and is not saved or sent.</string>
+</resources>
