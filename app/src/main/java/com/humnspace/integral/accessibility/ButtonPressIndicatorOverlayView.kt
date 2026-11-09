@@ -4,17 +4,30 @@ import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.content.Context
-import android.graphics.*
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
+import android.os.Handler
+import android.os.Looper
 import android.view.View
-import android.view.animation.AccelerateInterpolator
-import android.view.animation.DecelerateInterpolator
+import android.view.animation.PathInterpolator
+import kotlin.math.PI
+import kotlin.math.sin
 
 /**
- * Button Press Indicator:
- * A sleek button-sized rectangle with blended/rounded inner edges, attached flat to the device screen bezel.
+ * Essential Key — Organic Black Morph Press Animation
  *
- * Appears with smooth in-animation when the physical button is pressed down.
- * Contracts with smooth out-animation and disappears immediately as soon as the button is released.
+ * Recreates the distinctive black, curved, mountain-like deformation when the
+ * physical Essential Key is pressed against the screen bezel.
+ *
+ * Visual characteristics:
+ * - Pure AMOLED black (#000000)
+ * - Flowing, asymmetric mountain silhouette with continuous cubic Bézier curves
+ * - Tangents enter and leave flush with the screen bezel (zero visual seams)
+ * - Multi-phase organic morphing on emergence and smooth elastic settling
+ * - Extremely subtle, calm organic contour breathing during held state
+ * - Smooth cubic Bézier collapse upon release
  */
 class ButtonPressIndicatorOverlayView(
     context: Context,
@@ -33,33 +46,36 @@ class ButtonPressIndicatorOverlayView(
 
     private val density = resources.displayMetrics.density
 
-    // Button-sized rectangle dimensions
-    private val buttonHeightPx = 42f * density   // Matches physical hardware key height
-    private val maxDepthPx = 8f * density        // Inward protrusion depth from the bezel edge
-    private val cornerRadiusPx = 6f * density    // Blended corner radius on the inner edge
+    // Proportions calibrated for Nothing Phone & Android display ratios
+    private val maxDepthDp = 28.5f      // Peak protrusion into display
+    private val hTopDp = 70f            // Asymmetric upper slope span
+    private val hBotDp = 96f            // Asymmetric lower slope span
 
-    private var currentDepthPx = 0f
+    private val maxDepthPx = maxDepthDp * density
+    private val hTopPx = hTopDp * density
+    private val hBotPx = hBotDp * density
 
-    private val rectPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    // Morph state
+    private var morphProgress = 0f
+    private var heldPhase = 0f
+    private var isKeyDown = false
+
+    private val amoledPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.BLACK
         style = Paint.Style.FILL
     }
 
-    private val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(45, 0, 0, 0)
-        style = Paint.Style.STROKE
-        strokeWidth = 2.0f * density
-        maskFilter = BlurMaskFilter(3.0f * density, BlurMaskFilter.Blur.NORMAL)
-    }
+    private val mountainPath = Path()
 
-    private val buttonPath = Path()
-    private val tempRect = RectF()
-    private val cornerRadii = FloatArray(8)
-
-    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val autoDismissRunnable = Runnable { dismissImmediate() }
 
-    private var currentAnimator: ValueAnimator? = null
+    private var morphAnimator: ValueAnimator? = null
+    private var heldAnimator: ValueAnimator? = null
+
+    // Smooth cubic Bézier easing curves
+    private val emergenceInterpolator = PathInterpolator(0.22f, 1f, 0.36f, 1f)
+    private val releaseInterpolator = PathInterpolator(0.4f, 0f, 0.2f, 1f)
 
     init {
         setWillNotDraw(false)
@@ -67,171 +83,301 @@ class ButtonPressIndicatorOverlayView(
 
     fun triggerPress(type: PressType) {
         mainHandler.removeCallbacks(autoDismissRunnable)
-        currentAnimator?.cancel()
 
         when (type) {
-            PressType.DOWN -> animateIn()
-            PressType.UP, PressType.LONG_RELEASE -> animateOut()
-            PressType.SINGLE, PressType.DOUBLE, PressType.TRIPLE -> animateOut()
-            PressType.LONG_HOLD -> animateHold()
+            PressType.DOWN -> {
+                isKeyDown = true
+                animateIn()
+            }
+            PressType.UP, PressType.LONG_RELEASE, PressType.SINGLE, PressType.DOUBLE, PressType.TRIPLE -> {
+                isKeyDown = false
+                animateOut()
+            }
+            PressType.LONG_HOLD -> {
+                isKeyDown = true
+                animateHold()
+            }
         }
     }
 
     /**
-     * Smooth In-Animation:
-     * Slides / expands out from the bezel edge to full buttonDepth over 80ms.
+     * State B — Key Press (Touch Down):
+     * Emerges from the bezel and morphs into the asymmetric mountain silhouette (~210ms).
      */
     private fun animateIn() {
         mainHandler.removeCallbacks(autoDismissRunnable)
-        mainHandler.postDelayed(autoDismissRunnable, 900L) // Safety watchdog
+        mainHandler.postDelayed(autoDismissRunnable, 1500L) // Safety watchdog
         BadgerMotionEngine.Haptics.performPressurePoint(context)
 
-        val anim = ValueAnimator.ofFloat(currentDepthPx, maxDepthPx).apply {
-            duration = 80L
-            interpolator = DecelerateInterpolator(1.4f)
-            addUpdateListener {
-                currentDepthPx = it.animatedValue as Float
-                postInvalidateOnAnimation()
-            }
-        }
-        currentAnimator = anim
-        anim.start()
-    }
+        heldAnimator?.cancel()
+        morphAnimator?.cancel()
 
-    /**
-     * Smooth Out-Animation:
-     * Immediately slides back into the bezel edge as soon as button is released (105ms).
-     */
-    private fun animateOut() {
-        mainHandler.removeCallbacks(autoDismissRunnable)
-        val start = currentDepthPx
-        if (start <= 0.1f) {
-            onDismissRequest()
-            return
-        }
-
-        val anim = ValueAnimator.ofFloat(start, 0f).apply {
-            duration = 105L
-            interpolator = AccelerateInterpolator(1.3f)
+        val start = morphProgress
+        val anim = ValueAnimator.ofFloat(start, 1f).apply {
+            duration = (210L * (1f - start)).toLong().coerceIn(80L, 210L)
+            interpolator = emergenceInterpolator
             addUpdateListener {
-                currentDepthPx = it.animatedValue as Float
+                morphProgress = it.animatedValue as Float
                 postInvalidateOnAnimation()
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
-                    onDismissRequest()
+                    if (isKeyDown && morphProgress >= 0.98f) {
+                        startHeldBreathing()
+                    }
                 }
             })
         }
-        currentAnimator = anim
+        morphAnimator = anim
+        anim.start()
+    }
+
+    /**
+     * State C — Active Press (Held):
+     * Maintains the stable mountain silhouette with an extremely subtle living contour wave.
+     */
+    private fun startHeldBreathing() {
+        heldAnimator?.cancel()
+        val anim = ValueAnimator.ofFloat(0f, (2 * PI).toFloat()).apply {
+            duration = 3400L
+            repeatCount = ValueAnimator.INFINITE
+            addUpdateListener {
+                heldPhase = it.animatedValue as Float
+                postInvalidateOnAnimation()
+            }
+        }
+        heldAnimator = anim
         anim.start()
     }
 
     private fun animateHold() {
-        if (currentDepthPx < maxDepthPx) {
-            val anim = ValueAnimator.ofFloat(currentDepthPx, maxDepthPx).apply {
-                duration = 60L
-                interpolator = DecelerateInterpolator()
-                addUpdateListener {
-                    currentDepthPx = it.animatedValue as Float
-                    postInvalidateOnAnimation()
-                }
-            }
-            currentAnimator = anim
-            anim.start()
+        if (!isKeyDown) {
+            isKeyDown = true
         }
+        if (morphProgress < 0.98f) {
+            animateIn()
+        } else if (heldAnimator?.isRunning != true) {
+            startHeldBreathing()
+        }
+    }
+
+    /**
+     * State D — Release:
+     * Contours collapse smoothly and retract back into the bezel (190ms).
+     */
+    private fun animateOut() {
+        mainHandler.removeCallbacks(autoDismissRunnable)
+        heldAnimator?.cancel()
+        morphAnimator?.cancel()
+
+        val start = morphProgress
+        if (start <= 0.01f) {
+            dismissImmediate()
+            return
+        }
+
+        val anim = ValueAnimator.ofFloat(start, 0f).apply {
+            duration = (190L * start).toLong().coerceIn(70L, 190L)
+            interpolator = releaseInterpolator
+            addUpdateListener {
+                morphProgress = it.animatedValue as Float
+                postInvalidateOnAnimation()
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    dismissImmediate()
+                }
+            })
+        }
+        morphAnimator = anim
+        anim.start()
     }
 
     fun dismissImmediate() {
         mainHandler.removeCallbacks(autoDismissRunnable)
-        currentAnimator?.cancel()
-        currentDepthPx = 0f
+        heldAnimator?.cancel()
+        morphAnimator?.cancel()
+        morphProgress = 0f
+        isKeyDown = false
         postInvalidateOnAnimation()
         onDismissRequest()
     }
 
     override fun onDetachedFromWindow() {
         mainHandler.removeCallbacks(autoDismissRunnable)
-        currentAnimator?.cancel()
+        heldAnimator?.cancel()
+        morphAnimator?.cancel()
         super.onDetachedFromWindow()
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val d = currentDepthPx
-        if (d <= 0.05f || width <= 0 || height <= 0) return
+        val p = morphProgress
+        if (p <= 0.005f || width <= 0 || height <= 0) return
 
         val loc = DeviceOrientationHelper.getButtonScreenLocation(context, width.toFloat(), height.toFloat())
         val cx = loc.x
         val cy = loc.y
-        val h = buttonHeightPx
-        val r = cornerRadiusPx.coerceAtMost(d)
+        val w = width.toFloat()
+        val h = height.toFloat()
 
-        buttonPath.reset()
+        // 1. Organic Morph Interpolations (Non-linear multi-point expansion)
+        val pPeak = (p / 0.85f).coerceAtMost(1f)
+        val pUpper = ((p - 0.12f) / 0.88f).coerceIn(0f, 1f)
+        val pLower = ((p - 0.08f) / 0.92f).coerceIn(0f, 1f)
+
+        // Vertical envelope expansion along the screen bezel
+        val spanScale = 0.35f + 0.65f * Math.pow(p.toDouble(), 0.8).toFloat()
+        val curHTop = hTopPx * spanScale
+        val curHBot = hBotPx * spanScale
+
+        // Peak depth with subtle held living breathing
+        var curDepth = maxDepthPx * Math.pow(pPeak.toDouble(), 0.9).toFloat()
+        if (p >= 0.95f && isKeyDown) {
+            curDepth += 0.9f * density * sin(heldPhase.toDouble()).toFloat()
+        }
+
+        // Secondary feature morph weights
+        val uUpper = 12f * density * Math.pow(pUpper.toDouble(), 1.1).toFloat()
+        val uLower = 11f * density * Math.pow(pLower.toDouble(), 1.05).toFloat()
+        val uUpperCtrl = 5f * density * pUpper
+        val uLowerCtrl = 18f * density * pLower
+
+        // Vertical positions for control points relative to center
+        val vP1 = -28f * density * (0.4f + 0.6f * p)
+        val vP2 = 40f * density * (0.4f + 0.6f * p)
+        val vPeak = -6f * density
+
+        // Control point Ys
+        val c1v = -curHTop + 20f * density * Math.pow(p.toDouble(), 0.7).toFloat()
+        val c2v = -38f * density * (0.4f + 0.6f * p)
+        val c3v = vP1 + (vP1 - c2v) * 0.8f
+        val c4v = -18f * density * (0.5f + 0.5f * p)
+
+        val c5v = 8f * density * (0.5f + 0.5f * p)
+        val c6v = 24f * density * (0.4f + 0.6f * p)
+        val c7v = vP2 + (vP2 - c6v) * 0.7f
+        val c8v = curHBot - 20f * density * Math.pow(p.toDouble(), 0.7).toFloat()
+
+        // 2. Build continuous cubic Bézier mountain silhouette mapped to screen edge
+        mountainPath.reset()
 
         when (loc.edge) {
             ScreenEdge.RIGHT -> {
-                val edgeX = width.toFloat()
-                val peakX = edgeX - d
-                val topY = cy - h / 2f
-                val botY = cy + h / 2f
-
-                tempRect.set(peakX, topY, edgeX, botY)
-                // Top-left: r, Top-right: 0 (against bezel), Bottom-right: 0, Bottom-left: r
-                cornerRadii[0] = r; cornerRadii[1] = r
-                cornerRadii[2] = 0f; cornerRadii[3] = 0f
-                cornerRadii[4] = 0f; cornerRadii[5] = 0f
-                cornerRadii[6] = r; cornerRadii[7] = r
-                buttonPath.addRoundRect(tempRect, cornerRadii, Path.Direction.CW)
+                // p0 on bezel
+                mountainPath.moveTo(w, cy - curHTop)
+                // Segment 1: Ingress from top bezel to upper shoulder
+                mountainPath.cubicTo(
+                    w, cy + c1v,
+                    w - uUpperCtrl, cy + c2v,
+                    w - uUpper, cy + vP1
+                )
+                // Segment 2: Upper shoulder to mountain peak
+                mountainPath.cubicTo(
+                    w - (uUpper + (uUpper - uUpperCtrl) * 0.8f), cy + c3v,
+                    w - curDepth, cy + c4v,
+                    w - curDepth, cy + vPeak
+                )
+                // Segment 3: Mountain peak to lower shoulder
+                mountainPath.cubicTo(
+                    w - curDepth, cy + c5v,
+                    w - uLowerCtrl, cy + c6v,
+                    w - uLower, cy + vP2
+                )
+                // Segment 4: Lower shoulder returning smoothly tangent to bottom bezel
+                mountainPath.cubicTo(
+                    w - (uLower + (uLower - uLowerCtrl) * 0.7f), cy + c7v,
+                    w, cy + c8v,
+                    w, cy + curHBot
+                )
+                // Close along right screen bezel
+                mountainPath.lineTo(w, cy - curHTop)
+                mountainPath.close()
             }
             ScreenEdge.LEFT -> {
-                val edgeX = 0f
-                val peakX = d
-                val topY = cy - h / 2f
-                val botY = cy + h / 2f
-
-                tempRect.set(edgeX, topY, peakX, botY)
-                // Top-left: 0 (against bezel), Top-right: r, Bottom-right: r, Bottom-left: 0
-                cornerRadii[0] = 0f; cornerRadii[1] = 0f
-                cornerRadii[2] = r; cornerRadii[3] = r
-                cornerRadii[4] = r; cornerRadii[5] = r
-                cornerRadii[6] = 0f; cornerRadii[7] = 0f
-                buttonPath.addRoundRect(tempRect, cornerRadii, Path.Direction.CW)
+                // p0 on bezel
+                mountainPath.moveTo(0f, cy - curHTop)
+                // Segment 1
+                mountainPath.cubicTo(
+                    0f, cy + c1v,
+                    uUpperCtrl, cy + c2v,
+                    uUpper, cy + vP1
+                )
+                // Segment 2
+                mountainPath.cubicTo(
+                    uUpper + (uUpper - uUpperCtrl) * 0.8f, cy + c3v,
+                    curDepth, cy + c4v,
+                    curDepth, cy + vPeak
+                )
+                // Segment 3
+                mountainPath.cubicTo(
+                    curDepth, cy + c5v,
+                    uLowerCtrl, cy + c6v,
+                    uLower, cy + vP2
+                )
+                // Segment 4
+                mountainPath.cubicTo(
+                    uLower + (uLower - uLowerCtrl) * 0.7f, cy + c7v,
+                    0f, cy + c8v,
+                    0f, cy + curHBot
+                )
+                // Close along left screen bezel
+                mountainPath.lineTo(0f, cy - curHTop)
+                mountainPath.close()
             }
             ScreenEdge.TOP -> {
-                val leftX = cx - h / 2f
-                val rightX = cx + h / 2f
-                val peakY = d
-
-                tempRect.set(leftX, 0f, rightX, peakY)
-                // Top-left: 0, Top-right: 0, Bottom-right: r, Bottom-left: r
-                cornerRadii[0] = 0f; cornerRadii[1] = 0f
-                cornerRadii[2] = 0f; cornerRadii[3] = 0f
-                cornerRadii[4] = r; cornerRadii[5] = r
-                cornerRadii[6] = r; cornerRadii[7] = r
-                buttonPath.addRoundRect(tempRect, cornerRadii, Path.Direction.CW)
+                mountainPath.moveTo(cx - curHTop, 0f)
+                mountainPath.cubicTo(
+                    cx + c1v, 0f,
+                    cx + c2v, uUpperCtrl,
+                    cx + vP1, uUpper
+                )
+                mountainPath.cubicTo(
+                    cx + c3v, uUpper + (uUpper - uUpperCtrl) * 0.8f,
+                    cx + c4v, curDepth,
+                    cx + vPeak, curDepth
+                )
+                mountainPath.cubicTo(
+                    cx + c5v, curDepth,
+                    cx + c6v, uLowerCtrl,
+                    cx + vP2, uLower
+                )
+                mountainPath.cubicTo(
+                    cx + c7v, uLower + (uLower - uLowerCtrl) * 0.7f,
+                    cx + c8v, 0f,
+                    cx + curHBot, 0f
+                )
+                mountainPath.lineTo(cx - curHTop, 0f)
+                mountainPath.close()
             }
             ScreenEdge.BOTTOM -> {
-                val leftX = cx - h / 2f
-                val rightX = cx + h / 2f
-                val peakY = height.toFloat() - d
-
-                tempRect.set(leftX, peakY, rightX, height.toFloat())
-                // Top-left: r, Top-right: r, Bottom-right: 0, Bottom-left: 0
-                cornerRadii[0] = r; cornerRadii[1] = r
-                cornerRadii[2] = r; cornerRadii[3] = r
-                cornerRadii[4] = 0f; cornerRadii[5] = 0f
-                cornerRadii[6] = 0f; cornerRadii[7] = 0f
-                buttonPath.addRoundRect(tempRect, cornerRadii, Path.Direction.CW)
+                mountainPath.moveTo(cx - curHTop, h)
+                mountainPath.cubicTo(
+                    cx + c1v, h,
+                    cx + c2v, h - uUpperCtrl,
+                    cx + vP1, h - uUpper
+                )
+                mountainPath.cubicTo(
+                    cx + c3v, h - (uUpper + (uUpper - uUpperCtrl) * 0.8f),
+                    cx + c4v, h - curDepth,
+                    cx + vPeak, h - curDepth
+                )
+                mountainPath.cubicTo(
+                    cx + c5v, h - curDepth,
+                    cx + c6v, h - uLowerCtrl,
+                    cx + vP2, h - uLower
+                )
+                mountainPath.cubicTo(
+                    cx + c7v, h - (uLower + (uLower - uLowerCtrl) * 0.7f),
+                    cx + c8v, h,
+                    cx + curHBot, h
+                )
+                mountainPath.lineTo(cx - curHTop, h)
+                mountainPath.close()
             }
         }
 
-        // Draw soft ambient shadow along the rounded edge
-        if (d > 1.2f) {
-            canvas.drawPath(buttonPath, shadowPaint)
-        }
-
-        // Draw solid black button rectangle attached to bezel
-        canvas.drawPath(buttonPath, rectPaint)
+        // Draw deep pure AMOLED black organic silhouette
+        canvas.drawPath(mountainPath, amoledPaint)
     }
 }

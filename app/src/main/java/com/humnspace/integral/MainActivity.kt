@@ -27,6 +27,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.core.content.ContextCompat
 import com.humnspace.integral.accessibility.BadgerMotionEngine
+import com.humnspace.integral.accessibility.ButtonPressIndicatorOverlayView
 import com.humnspace.integral.accessibility.ReminderManager
 import com.humnspace.integral.accessibility.SavedCropsManager
 import androidx.core.accessibilityservice.AccessibilityServiceInfoCompat
@@ -362,6 +363,11 @@ private fun HomeScreen(
     }
 
     fun triggerPreview() {
+        ScreenAnalysisOverlay.showButtonPress(context, ButtonPressIndicatorOverlayView.PressType.DOWN)
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            ScreenAnalysisOverlay.showButtonPress(context, ButtonPressIndicatorOverlayView.PressType.UP)
+        }, 220L)
+
         when (selectedAction.id) {
             EssentialKeyService.ACTION_RINGER -> {
                 val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
