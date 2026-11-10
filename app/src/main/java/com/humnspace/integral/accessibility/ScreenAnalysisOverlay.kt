@@ -109,7 +109,11 @@ object ScreenAnalysisOverlay {
         }
     }
 
-    fun showButtonPress(context: Context, type: ButtonPressIndicatorOverlayView.PressType) {
+    fun showButtonPress(
+        context: Context,
+        type: ButtonPressIndicatorOverlayView.PressType,
+        tapIndex: Int = 0
+    ) {
         val manager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         windowManager = manager
         if (activePressIndicator == null) {
@@ -130,10 +134,18 @@ object ScreenAnalysisOverlay {
                 }
             }
             activePressIndicator = indicator
+            val windowType = if (context is AccessibilityService) {
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            } else {
+                @Suppress("DEPRECATION")
+                WindowManager.LayoutParams.TYPE_PHONE
+            }
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                windowType,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
@@ -146,9 +158,13 @@ object ScreenAnalysisOverlay {
             }
             try {
                 manager.addView(indicator, params)
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+                (context as? android.app.Activity)?.window?.decorView?.let { decor ->
+                    (decor as? ViewGroup)?.addView(indicator)
+                }
+            }
         }
-        activePressIndicator?.triggerPress(type)
+        activePressIndicator?.triggerPress(type, tapIndex)
     }
 
     fun onLongPressKeyUp() {
@@ -4024,13 +4040,6 @@ object ScreenAnalysisOverlay {
             }
         } catch (_: RuntimeException) { }
         activeVoiceRecordingOverlay = null
-        try {
-            activePressIndicator?.let { ind ->
-                manager?.removeView(ind)
-                (ind.parent as? ViewGroup)?.removeView(ind)
-            }
-        } catch (_: RuntimeException) { }
-        activePressIndicator = null
         try { scanRoot?.let { manager?.removeView(it) } ?: glowView?.let { manager?.removeView(it) } } catch (_: RuntimeException) { }
         try { panelView?.let { manager?.removeView(it) } } catch (_: RuntimeException) { }
         try { if (resultsPanel !== panelView) resultsPanel?.let { manager?.removeView(it) } } catch (_: RuntimeException) { }

@@ -44,9 +44,9 @@ class RingerExpansionOverlayView(
 
     private val density = resources.displayMetrics.density
 
-    // Physical dimensions (Refined Nothing squircle)
-    private val capsuleW = 60f * density
-    private val capsuleH = 60f * density
+    // Physical dimensions (Circle for Ring, Squircle for Vibrate)
+    private val capsuleW = 62f * density
+    private val capsuleH = 62f * density
     private val capsuleCorner = 18f * density
     private val marginFromBezel = 14f * density
 
@@ -55,7 +55,6 @@ class RingerExpansionOverlayView(
     val isCollapsing: Boolean get() = (state == State.COLLAPSING)
 
     private var slideProgress = 0f      // 0f (inside bezel) to 1f (fully expanded)
-    private var shimmerProgress = 0f    // 0f to 1f specular border sweep
     private var iconMorphProgress = when (mode) {
         "vibrate" -> 1f
         "silent" -> 2f
@@ -64,7 +63,6 @@ class RingerExpansionOverlayView(
     private var iconPulse = 1f
 
     private var slideAnimator: ValueAnimator? = null
-    private var shimmerAnimator: ValueAnimator? = null
     private var morphAnimator: ValueAnimator? = null
     private val handler = Handler(Looper.getMainLooper())
     private val autoDismissRunnable = Runnable { dismissWithCollapse() }
@@ -80,20 +78,21 @@ class RingerExpansionOverlayView(
     private val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
         color = Color.BLACK
-        maskFilter = BlurMaskFilter(16f * density, BlurMaskFilter.Blur.NORMAL)
+        maskFilter = BlurMaskFilter(14f * density, BlurMaskFilter.Blur.NORMAL)
     }
 
-    private val glassContainerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val containerFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
 
-    private val metallicBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val containerBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 1.0f * density
     }
 
     private val iconFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
+        color = Color.BLACK
     }
 
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -104,13 +103,15 @@ class RingerExpansionOverlayView(
 
     private val ringSoundPath: Path by lazy {
         try {
-            PathParser.createPathFromPathData("M12 22q-.825 0-1.412-.587T10 20h4q0 .825-.587 1.413T12 22m-8-3v-2h2v-7q0-2.075 1.25-3.687T10.5 4.2v-.7q0-.625.438-1.062T12 2t1.063.438T13.5 3.5v.7q.725.175 1.338.513t1.137.787L13 8.45v4.5L19.05 19zm14.9-3l-1.425-1.4q.725-.725 1.125-1.75t.4-2.15t-.4-2.15t-1.125-1.75l1.425-1.4q1.1 1.1 1.7 2.55t.6 3.1t-.6 3.1t-1.7 2.55M15.05 14l-1.425-1.4q.35-.35.55-.825t.2-.975t-.2-.975t-.55-.825L15.05 7.6q.7.7 1.075 1.625T16.5 11t-.375 1.775T15.05 14")
+            // Material Symbols notifications (filled, bold, perfectly centered 24x24)
+            PathParser.createPathFromPathData("M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z")
         } catch (_: Exception) { Path() }
     }
 
     private val mobileVibratePath: Path by lazy {
         try {
-            PathParser.createPathFromPathData("M2 17.25q-.425 0-.712-.288T1 16.25v-8.5q0-.425.288-.712T2 6.75q.425 0 .713.288T3 7.75v8.5q0 .425-.288.713T2 17.25Zm20 0q-.425 0-.712-.288T21 16.25v-8.5q0-.425.288-.712T22 6.75q.425 0 .713.288T23 7.75v8.5q0 .425-.288.713T22 17.25ZM7 21q-.825 0-1.412-.587T5 19V5q0-.825.588-1.412T7 3h10q.825 0 1.413.588T19 5v14q0 .825-.587 1.413T17 21Zm0-2h10V5H7Zm5-3.5q.625 0 1.063-.438T13.5 15q0-.625-.437-1.063T12 13.5q-.625 0-1.062.437T10.5 15q0 .625.438 1.063T12 16.5ZM7 5v14z")
+            // Material Symbols vibration (bold phone + vibration waves, centered 24x24)
+            PathParser.createPathFromPathData("M0 15h2V9H0v6zm3 2h2V7H3v10zm19-8v6h2V9h-2zm-3 8h2V7h-2v10zM17 3H7c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 15H7V6h10v12z")
         } catch (_: Exception) { Path() }
     }
 
@@ -169,10 +170,8 @@ class RingerExpansionOverlayView(
     private fun startSlideOutAnimation() {
         state = State.EXPANDING
         slideProgress = 0f
-        shimmerProgress = 0f
 
         slideAnimator?.cancel()
-        shimmerAnimator?.cancel()
 
         NothingGlyphController.onRingerChanged()
         when (mode) {
@@ -202,17 +201,6 @@ class RingerExpansionOverlayView(
                     }
                 }
             })
-            start()
-        }
-
-        // Shimmer sweep across perimeter
-        shimmerAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = 340L
-            interpolator = BadgerMotionEngine.Physics.SmoothDecelerate
-            addUpdateListener {
-                shimmerProgress = it.animatedValue as Float
-                postInvalidateOnAnimation()
-            }
             start()
         }
     }
@@ -263,18 +251,6 @@ class RingerExpansionOverlayView(
             addUpdateListener {
                 iconMorphProgress = it.animatedValue as Float
                 iconPulse = 1f + 0.14f * sin((it.animatedFraction * Math.PI).toFloat())
-                postInvalidateOnAnimation()
-            }
-            start()
-        }
-
-        // Shimmer re-trigger
-        shimmerAnimator?.cancel()
-        shimmerAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = 280L
-            interpolator = BadgerMotionEngine.Physics.SmoothDecelerate
-            addUpdateListener {
-                shimmerProgress = it.animatedValue as Float
                 postInvalidateOnAnimation()
             }
             start()
@@ -345,7 +321,6 @@ class RingerExpansionOverlayView(
         IntegralAcoustics.playOverlayDismiss(context)
         handler.removeCallbacks(autoDismissRunnable)
         slideAnimator?.cancel()
-        shimmerAnimator?.cancel()
         morphAnimator?.cancel()
 
         var wasCancelled = false
@@ -383,13 +358,15 @@ class RingerExpansionOverlayView(
         val resting = restingCapsuleRect
 
         // Shape-morphing chassis geometry:
-        // Bezel indicator becomes the leading edge; stretches horizontally from physical button
         val curWidth = capsuleW * p.coerceIn(0.04f, 1f)
         val curHeight = capsuleH
 
-        // Corners gradually morph from a narrow pill (curHeight / 2) into final capsule corner
+        // Morph between Circle (for Ring, m=0) and Squircle (for Vibrate, m=1)
+        val m = iconMorphProgress.coerceIn(0f, 1f)
         val maxRadius = curHeight / 2f
-        val curRadius = maxRadius + (capsuleCorner - maxRadius) * p.coerceIn(0f, 1f)
+        val squircleRadius = capsuleCorner
+        val targetRestingCorner = maxRadius + (squircleRadius - maxRadius) * m
+        val curRadius = maxRadius + (targetRestingCorner - maxRadius) * p.coerceIn(0f, 1f)
 
         when (loc.edge) {
             ScreenEdge.RIGHT -> {
@@ -418,51 +395,37 @@ class RingerExpansionOverlayView(
             }
         }
 
-
-        // 1. Soft atmospheric drop shadow
+        // 1. Soft atmospheric drop shadow matching contour
         if (p > 0.2f) {
-            val shadowA = (80 * p).toInt().coerceIn(0, 100)
+            val shadowA = (60 * p).toInt().coerceIn(0, 80)
             shadowPaint.color = Color.argb(shadowA, 0, 0, 0)
             canvas.drawRoundRect(tempRect, curRadius, curRadius, shadowPaint)
         }
 
-        // 2. Pitch black squircle glass surface
+        // 2. Container surface:
+        // - Ring: Circle with Accent Yellow (#FFB300)
+        // - Vibrate: Squircle with Pure White (#FFFFFF)
         capsulePath.reset()
         capsulePath.addRoundRect(tempRect, curRadius, curRadius, Path.Direction.CW)
-        glassContainerPaint.color = Color.argb((255 * p.coerceIn(0f, 1f)).toInt(), 12, 12, 14)
-        canvas.drawPath(capsulePath, glassContainerPaint)
 
-        // 3. Shimmering amber metallic border
-        drawShimmeringMetallicBorder(canvas, tempRect, p.coerceIn(0f, 1f), curRadius)
+        val rBg = 255
+        val gBg = (179 + (255 - 179) * m).toInt().coerceIn(0, 255)
+        val bBg = (0 + (255 - 0) * m).toInt().coerceIn(0, 255)
+        containerFillPaint.color = Color.argb((255 * p.coerceIn(0f, 1f)).toInt(), rBg, gBg, bBg)
+        canvas.drawPath(capsulePath, containerFillPaint)
 
-        // 4. Centered morphing icon (Material Symbols notification_sound / mobile_vibrate)
-        if (p >= 0.35f) {
-            val contentAlpha = ((p - 0.35f) / 0.65f).coerceIn(0f, 1f)
+        // 3. Crisp subtle border for edge definition against bright backgrounds
+        val borderA = (22 * p.coerceIn(0f, 1f)).toInt().coerceIn(0, 255)
+        containerBorderPaint.color = Color.argb(borderA, 0, 0, 0)
+        canvas.drawRoundRect(tempRect, curRadius, curRadius, containerBorderPaint)
+
+        // 4. Centered big black morphing icon
+        if (p >= 0.30f) {
+            val contentAlpha = ((p - 0.30f) / 0.70f).coerceIn(0f, 1f)
             val iconX = tempRect.centerX()
             val iconY = tempRect.centerY()
             drawMorphingIcon(canvas, iconX, iconY, contentAlpha)
         }
-    }
-
-    private fun drawShimmeringMetallicBorder(canvas: Canvas, rect: RectF, alpha: Float, radius: Float) {
-        val s = shimmerProgress.coerceIn(0f, 1f)
-        val shimmerX = rect.left + (rect.width() + 40f * density) * s - 20f * density
-        val shimmerSpan = 32f * density
-
-        val baseBorderA = (48 * alpha).toInt().coerceIn(0, 255)
-        val flashA = (180 * alpha).toInt().coerceIn(0, 255)
-        val amberDark = Color.argb(baseBorderA, 255, 179, 0)
-        val amberFlash = Color.argb(flashA, 255, 220, 110)
-
-        metallicBorderPaint.shader = LinearGradient(
-            shimmerX - shimmerSpan, rect.top, shimmerX + shimmerSpan, rect.bottom,
-            intArrayOf(amberDark, amberDark, amberFlash, amberDark, amberDark),
-            floatArrayOf(0f, 0.35f, 0.5f, 0.65f, 1f),
-            Shader.TileMode.CLAMP
-        )
-
-        canvas.drawRoundRect(rect, radius, radius, metallicBorderPaint)
-        metallicBorderPaint.shader = null
     }
 
     private fun drawMorphingIcon(canvas: Canvas, cx: Float, cy: Float, alpha: Float) {
@@ -474,41 +437,50 @@ class RingerExpansionOverlayView(
         canvas.translate(cx, cy)
         canvas.scale(pulse, pulse)
 
-        val iconSize = 26f * density
+        val iconSize = 34f * density // Big bold icon
         val scaleF = iconSize / 24f
 
         val isSilent = (mode == "silent" || iconMorphProgress >= 1.5f)
-        val ringWeight = if (isSilent) 1f else (1f - m).coerceIn(0f, 1f)
+        val ringWeight = if (isSilent) 0f else (1f - m).coerceIn(0f, 1f)
         val vibWeight = if (isSilent) 0f else m.coerceIn(0f, 1f)
 
+        // Pure black icons for both Ring and Vibrate
         if (ringWeight > 0.01f) {
             val rA = (alphaInt * ringWeight).toInt().coerceIn(0, 255)
-            iconFillPaint.color = Color.argb(rA, 255, 179, 0)
+            iconFillPaint.color = Color.argb(rA, 0, 0, 0)
+            canvas.save()
+            canvas.scale(scaleF, scaleF)
+            canvas.translate(-12f, -12f)
+            canvas.drawPath(ringSoundPath, iconFillPaint)
+            canvas.restore()
+        }
+
+        if (vibWeight > 0.01f) {
+            val vA = (alphaInt * vibWeight).toInt().coerceIn(0, 255)
+            iconFillPaint.color = Color.argb(vA, 0, 0, 0)
+            canvas.save()
+            canvas.scale(scaleF, scaleF)
+            canvas.translate(-12f, -12f)
+            canvas.drawPath(mobileVibratePath, iconFillPaint)
+            canvas.restore()
+        }
+
+        if (isSilent) {
+            val sA = alphaInt
+            iconFillPaint.color = Color.argb(sA, 0, 0, 0)
             canvas.save()
             canvas.scale(scaleF, scaleF)
             canvas.translate(-12f, -12f)
             canvas.drawPath(ringSoundPath, iconFillPaint)
             canvas.restore()
 
-            if (isSilent) {
-                val slashPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    style = Paint.Style.STROKE
-                    color = Color.argb(rA, 255, 179, 0)
-                    strokeCap = Paint.Cap.ROUND
-                    strokeWidth = 2.2f * density
-                }
-                canvas.drawLine(-9f * density, -9f * density, 9f * density, 8f * density, slashPaint)
+            val slashPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                color = Color.argb(sA, 0, 0, 0)
+                strokeCap = Paint.Cap.ROUND
+                strokeWidth = 2.4f * density
             }
-        }
-
-        if (vibWeight > 0.01f) {
-            val vA = (alphaInt * vibWeight).toInt().coerceIn(0, 255)
-            iconFillPaint.color = Color.argb(vA, 255, 179, 0)
-            canvas.save()
-            canvas.scale(scaleF, scaleF)
-            canvas.translate(-12f, -12f)
-            canvas.drawPath(mobileVibratePath, iconFillPaint)
-            canvas.restore()
+            canvas.drawLine(-11f * density, -11f * density, 11f * density, 10f * density, slashPaint)
         }
 
         canvas.restore()
@@ -524,7 +496,6 @@ class RingerExpansionOverlayView(
     override fun onDetachedFromWindow() {
         handler.removeCallbacks(autoDismissRunnable)
         slideAnimator?.cancel()
-        shimmerAnimator?.cancel()
         morphAnimator?.cancel()
         super.onDetachedFromWindow()
     }

@@ -363,60 +363,76 @@ private fun HomeScreen(
     }
 
     fun triggerPreview() {
-        ScreenAnalysisOverlay.showButtonPress(context, ButtonPressIndicatorOverlayView.PressType.DOWN)
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            ScreenAnalysisOverlay.showButtonPress(context, ButtonPressIndicatorOverlayView.PressType.UP)
-        }, 220L)
-
-        when (selectedAction.id) {
-            EssentialKeyService.ACTION_RINGER -> {
-                val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                val targetMode = if (audio.ringerMode == AudioManager.RINGER_MODE_VIBRATE) "ring" else "vibrate"
-                ScreenAnalysisOverlay.showRingerOverlay(context, targetMode, null)
-            }
-            EssentialKeyService.ACTION_VOICE_SEARCH -> {
-                if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                    ScreenAnalysisOverlay.showVoiceSearchOverlay(context)
-                } else {
-                    audioPermission.launch(Manifest.permission.RECORD_AUDIO)
-                }
-            }
-            EssentialKeyService.ACTION_VOICE_RECORDING -> {
-                if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                    ScreenAnalysisOverlay.showVoiceRecordingOverlay(context)
-                } else {
-                    audioPermission.launch(Manifest.permission.RECORD_AUDIO)
-                }
-            }
-            EssentialKeyService.ACTION_CONTENTS -> {
-                (context as? MainActivity)?.let {
-                    Toast.makeText(context, "Press the Badge button to trigger Get Content on screen", Toast.LENGTH_SHORT).show()
-                }
-            }
-            EssentialKeyService.ACTION_BUBBLE_HUB -> {
-                ScreenAnalysisOverlay.showFeatureBubbles(
-                    context = context,
-                    onSelectRinger = {
-                        val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                        val targetMode = if (audio.ringerMode == AudioManager.RINGER_MODE_VIBRATE) "ring" else "vibrate"
-                        ScreenAnalysisOverlay.showRingerOverlay(context, targetMode, null)
-                    },
-                    onSelectGetContent = {
-                        ScreenAnalysisOverlay.showVoiceRecordingOverlay(context)
-                    },
-                    onSelectVoice = {
-                        if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                            ScreenAnalysisOverlay.showVoiceSearchOverlay(context)
-                        } else {
-                            audioPermission.launch(Manifest.permission.RECORD_AUDIO)
-                        }
-                    }
-                )
-            }
-            EssentialKeyService.ACTION_QR_SCAN -> ScreenAnalysisOverlay.showQrLens(context, null)
-            EssentialKeyService.ACTION_SUMMARIZE -> ScreenAnalysisOverlay.showScreenSummarizer(context, null)
-            else -> Toast.makeText(context, "${selectedAction.title} selected for Badge button", Toast.LENGTH_SHORT).show()
+        val previewPressType = when (selectedGestureIndex) {
+            0 -> ButtonPressIndicatorOverlayView.PressType.SINGLE
+            1 -> ButtonPressIndicatorOverlayView.PressType.DOUBLE
+            2 -> ButtonPressIndicatorOverlayView.PressType.TRIPLE
+            else -> ButtonPressIndicatorOverlayView.PressType.LONG_HOLD
         }
+        ScreenAnalysisOverlay.showButtonPress(context, previewPressType)
+        if (selectedGestureIndex == 3) {
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                ScreenAnalysisOverlay.showButtonPress(context, ButtonPressIndicatorOverlayView.PressType.LONG_RELEASE)
+            }, 800L)
+        }
+
+        val actionDelay = when (selectedGestureIndex) {
+            0 -> 220L
+            1 -> 360L
+            2 -> 480L
+            else -> 750L
+        }
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            when (selectedAction.id) {
+                EssentialKeyService.ACTION_RINGER -> {
+                    val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                    val targetMode = if (audio.ringerMode == AudioManager.RINGER_MODE_VIBRATE) "ring" else "vibrate"
+                    ScreenAnalysisOverlay.showRingerOverlay(context, targetMode, null)
+                }
+                EssentialKeyService.ACTION_VOICE_SEARCH -> {
+                    if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                        ScreenAnalysisOverlay.showVoiceSearchOverlay(context)
+                    } else {
+                        audioPermission.launch(Manifest.permission.RECORD_AUDIO)
+                    }
+                }
+                EssentialKeyService.ACTION_VOICE_RECORDING -> {
+                    if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                        ScreenAnalysisOverlay.showVoiceRecordingOverlay(context)
+                    } else {
+                        audioPermission.launch(Manifest.permission.RECORD_AUDIO)
+                    }
+                }
+                EssentialKeyService.ACTION_CONTENTS -> {
+                    (context as? MainActivity)?.let {
+                        Toast.makeText(context, "Press the Badge button to trigger Get Content on screen", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                EssentialKeyService.ACTION_BUBBLE_HUB -> {
+                    ScreenAnalysisOverlay.showFeatureBubbles(
+                        context = context,
+                        onSelectRinger = {
+                            val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                            val targetMode = if (audio.ringerMode == AudioManager.RINGER_MODE_VIBRATE) "ring" else "vibrate"
+                            ScreenAnalysisOverlay.showRingerOverlay(context, targetMode, null)
+                        },
+                        onSelectGetContent = {
+                            ScreenAnalysisOverlay.showVoiceRecordingOverlay(context)
+                        },
+                        onSelectVoice = {
+                            if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                ScreenAnalysisOverlay.showVoiceSearchOverlay(context)
+                            } else {
+                                audioPermission.launch(Manifest.permission.RECORD_AUDIO)
+                            }
+                        }
+                    )
+                }
+                EssentialKeyService.ACTION_QR_SCAN -> ScreenAnalysisOverlay.showQrLens(context, null)
+                EssentialKeyService.ACTION_SUMMARIZE -> ScreenAnalysisOverlay.showScreenSummarizer(context, null)
+                else -> Toast.makeText(context, "${selectedAction.title} selected for Badge button", Toast.LENGTH_SHORT).show()
+            }
+        }, actionDelay)
     }
 
     Column(
@@ -1357,7 +1373,7 @@ private fun HomeScreen(
     }
 }
 
-private data class BadgerAction(
+data class BadgerAction(
     val id: String,
     val title: String,
     val description: String,

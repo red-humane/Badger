@@ -241,8 +241,12 @@ class EssentialKeyService : AccessibilityService() {
         longPressFired = false
         pendingMultiTap?.let(mainHandler::removeCallbacks)
         pendingMultiTap = null
-        // Soft yellow line indicator grows immediately under the button
-        ScreenAnalysisOverlay.showButtonPress(this, ButtonPressIndicatorOverlayView.PressType.DOWN)
+        // Organic black mountain deformation grows attached to the bezel with distinct intensity per tap
+        ScreenAnalysisOverlay.showButtonPress(
+            this,
+            ButtonPressIndicatorOverlayView.PressType.DOWN,
+            tapIndex = tapCount
+        )
         performPressHaptic()
         mainHandler.removeCallbacks(longPressAction)
         mainHandler.postDelayed(longPressAction, LONG_PRESS_TIMEOUT_MS)
@@ -253,15 +257,16 @@ class EssentialKeyService : AccessibilityService() {
         selectedKeyDown = false
         mainHandler.removeCallbacks(longPressAction)
 
-        // As soon as button is released, smoothly retract and dismiss button press indicator
-        ScreenAnalysisOverlay.showButtonPress(this, ButtonPressIndicatorOverlayView.PressType.UP)
-
         if (longPressFired) {
             longPressFired = false
             tapCount = 0
+            ScreenAnalysisOverlay.showButtonPress(this, ButtonPressIndicatorOverlayView.PressType.LONG_RELEASE)
             ScreenAnalysisOverlay.onLongPressKeyUp()
             return
         }
+
+        // As soon as button is released, smoothly retract and dismiss button press indicator
+        ScreenAnalysisOverlay.showButtonPress(this, ButtonPressIndicatorOverlayView.PressType.UP)
 
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         val singleAction = prefs.getString(ACTION_SINGLE, prefs.getString(MAPPED_ACTION, ACTION_RINGER)) ?: ACTION_RINGER
@@ -278,6 +283,10 @@ class EssentialKeyService : AccessibilityService() {
         if (tapCount >= 3) {
             tapCount = 0
             cancelRingerPreview()
+            ScreenAnalysisOverlay.showButtonPress(
+                this,
+                ButtonPressIndicatorOverlayView.PressType.TRIPLE
+            )
             runMappedGesture(ACTION_TRIPLE)
             return
         }
@@ -288,11 +297,17 @@ class EssentialKeyService : AccessibilityService() {
             pendingMultiTap = null
             when (count) {
                 1 -> runMappedGesture(ACTION_SINGLE)
-                2 -> runMappedGesture(ACTION_DOUBLE)
+                2 -> {
+                    ScreenAnalysisOverlay.showButtonPress(
+                        this@EssentialKeyService,
+                        ButtonPressIndicatorOverlayView.PressType.DOUBLE
+                    )
+                    runMappedGesture(ACTION_DOUBLE)
+                }
             }
         }
         pendingMultiTap = multiTap
-        mainHandler.postDelayed(multiTap, DOUBLE_PRESS_TIMEOUT_MS)
+        mainHandler.postDelayed(multiTap, MULTI_TAP_TIMEOUT_MS)
     }
 
     private fun resetPressState() {
@@ -604,7 +619,7 @@ const val GLYPHS_VOICE_REACTIVITY = "glyphs_voice_reactivity"
         const val ACTION_SUMMARIZE = "summarize"
         const val ACTION_NONE = "none"
         private const val LONG_PRESS_TIMEOUT_MS = 480L
-        private const val DOUBLE_PRESS_TIMEOUT_MS = 150L
+        private const val MULTI_TAP_TIMEOUT_MS = 250L
         const val ESSENTIAL_KEY_SCAN_CODE = 250
     }
 }
