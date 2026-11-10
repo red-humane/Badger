@@ -47,6 +47,7 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import android.graphics.Typeface
 import android.content.ClipboardManager
+import androidx.core.graphics.PathParser
 import com.humnspace.integral.R
 
 /** A temporary, touchable results sheet with a touch-through perimeter animation. */
@@ -1457,7 +1458,7 @@ object ScreenAnalysisOverlay {
     private data class SemanticResultItem(
         val id: String,
         val category: String,
-        val iconEmoji: String,
+        val iconType: String,
         val title: String,
         val subtitle: String?,
         val bounds: android.graphics.Rect,
@@ -1466,6 +1467,20 @@ object ScreenAnalysisOverlay {
         val actions: List<ActionBubbleItem>
     )
     private data class ActionBubbleItem(val label: String, val onClick: () -> Unit)
+
+    private fun getCategoryVectorPath(iconType: String): Path {
+        val pathStr = when (iconType.lowercase()) {
+            "numbers", "phone" -> "M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 0 0-1.01.24l-2.2 2.2a15.045 15.045 0 0 1-6.59-6.59l2.2-2.21a.96.96 0 0 0 .25-1.01A11.36 11.36 0 0 1 8.5 3.92c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1 0 9.39 7.61 17 17 17 .55 0 1-.45 1-1v-3.54c0-.55-.45-1-1-1z"
+            "events", "calendar" -> "M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-1.99.9-1.99 2L3 19c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z"
+            "links", "link" -> "M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"
+            "emails", "email" -> "M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"
+            "addresses", "address", "location" -> "M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 0 1 0-5 2.5 2.5 0 0 1 0 5z"
+            else -> "M12 2l2.4 7.2h7.6l-6.1 4.5 2.3 7.3-6.2-4.6-6.2 4.6 2.3-7.3-6.1-4.5h7.6z"
+        }
+        return try {
+            PathParser.createPathFromPathData(pathStr)
+        } catch (_: Exception) { Path() }
+    }
 
     private class ActionMenuBubbleDrawable(
         private val cornerRadius: Float,
@@ -2651,11 +2666,18 @@ object ScreenAnalysisOverlay {
                             tempPaint.style = Paint.Style.FILL
                             tempPaint.color = Color.argb((35 + (20 * pulse)).toInt(), 255, 179, 0)
                             canvas.drawRoundRect(bx, 4f * density, 4f * density, tempPaint)
-                            // Floating favicon
-                            tempPaint.textSize = 12f * density
+                            // Floating vector badge
                             val favY = bx.top - 4f * density - (3f * density * pulse)
-                            val iconEmoji = if (link.type == "email") "✉️" else "🔗"
-                            canvas.drawText(iconEmoji, (bx.right + 2f * density).coerceAtMost(width - 16f * density), favY + 10f * density, tempPaint)
+                            val vectorPath = getCategoryVectorPath(if (link.type == "email") "email" else "link")
+                            val icX = (bx.right + 6f * density).coerceAtMost(width - 16f * density)
+                            val icY = favY + 4f * density
+                            canvas.save()
+                            canvas.translate(icX, icY)
+                            val s = (12f * density) / 24f
+                            canvas.scale(s, s)
+                            canvas.translate(-12f, -12f)
+                            canvas.drawPath(vectorPath, chromaGlowPaint)
+                            canvas.restore()
                         } else {
                             canvas.drawRoundRect(bx, 4f * density, 4f * density, linkBoxPaint)
                         }
@@ -3378,7 +3400,7 @@ object ScreenAnalysisOverlay {
                 isClickable = true
                 isFocusable = true
 
-                // 1. Leading M3E Expressive Squircle Avatar
+                // 1. Leading M3E Expressive Squircle Avatar with Crisp Vector Icon
                 val avatarSize = dp(40)
                 val iconContainer = FrameLayout(context).apply {
                     layoutParams = LinearLayout.LayoutParams(avatarSize, avatarSize)
@@ -3388,12 +3410,25 @@ object ScreenAnalysisOverlay {
                         setColor(Color.argb(45, 255, 179, 0))
                         setStroke(dp(1), Color.argb(90, 255, 179, 0))
                     }
-                    val iconTv = TextView(context).apply {
-                        text = item.iconEmoji
-                        textSize = 17f
-                        gravity = Gravity.CENTER
+                    val vectorPath = getCategoryVectorPath(item.iconType)
+                    val iconView = object : View(context) {
+                        private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                            style = Paint.Style.FILL
+                            color = amberYellow
+                        }
+                        override fun onDraw(canvas: Canvas) {
+                            super.onDraw(canvas)
+                            val iconTargetSize = 20f * density
+                            val scale = iconTargetSize / 24f
+                            canvas.save()
+                            canvas.translate(width / 2f, height / 2f)
+                            canvas.scale(scale, scale)
+                            canvas.translate(-12f, -12f)
+                            canvas.drawPath(vectorPath, iconPaint)
+                            canvas.restore()
+                        }
                     }
-                    addView(iconTv, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
+                    addView(iconView, FrameLayout.LayoutParams(-1, -1))
                 }
                 addView(iconContainer)
 
@@ -3554,9 +3589,26 @@ object ScreenAnalysisOverlay {
                     isClickable = true
                     isFocusable = true
 
-                    val icon = TextView(context).apply {
-                        text = "📅 "
-                        textSize = 10.5f
+                    val icon = object : View(context) {
+                        private val path = getCategoryVectorPath("calendar")
+                        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                            style = Paint.Style.FILL
+                            color = Color.rgb(255, 179, 0)
+                        }
+                        override fun onDraw(canvas: Canvas) {
+                            super.onDraw(canvas)
+                            val s = (12f * density) / 24f
+                            canvas.save()
+                            canvas.translate(width / 2f, height / 2f)
+                            canvas.scale(s, s)
+                            canvas.translate(-12f, -12f)
+                            canvas.drawPath(path, paint)
+                            canvas.restore()
+                        }
+                    }.apply {
+                        layoutParams = LinearLayout.LayoutParams(dp(14), dp(14)).apply {
+                            rightMargin = dp(4)
+                        }
                     }
                     val label = TextView(context).apply {
                         text = "Create Event"
@@ -3621,9 +3673,26 @@ object ScreenAnalysisOverlay {
                     isClickable = true
                     isFocusable = true
 
-                    val icon = TextView(context).apply {
-                        text = "📍 "
-                        textSize = 10.5f
+                    val icon = object : View(context) {
+                        private val path = getCategoryVectorPath("location")
+                        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                            style = Paint.Style.FILL
+                            color = Color.rgb(255, 179, 0)
+                        }
+                        override fun onDraw(canvas: Canvas) {
+                            super.onDraw(canvas)
+                            val s = (12f * density) / 24f
+                            canvas.save()
+                            canvas.translate(width / 2f, height / 2f)
+                            canvas.scale(s, s)
+                            canvas.translate(-12f, -12f)
+                            canvas.drawPath(path, paint)
+                            canvas.restore()
+                        }
+                    }.apply {
+                        layoutParams = LinearLayout.LayoutParams(dp(14), dp(14)).apply {
+                            rightMargin = dp(4)
+                        }
                     }
                     val label = TextView(context).apply {
                         text = "Navigate"
@@ -3930,7 +3999,7 @@ object ScreenAnalysisOverlay {
                     SemanticResultItem(
                         id = "event_$i",
                         category = "Events",
-                        iconEmoji = "📅",
+                        iconType = "calendar",
                         title = ev.title,
                         subtitle = ev.dateSummary,
                         bounds = ev.bounds,
@@ -3970,7 +4039,7 @@ object ScreenAnalysisOverlay {
                     SemanticResultItem(
                         id = "phone_$i",
                         category = "Numbers",
-                        iconEmoji = "📞",
+                        iconType = "phone",
                         title = numStr,
                         subtitle = null,
                         bounds = phoneItem.bounds,
@@ -4027,7 +4096,7 @@ object ScreenAnalysisOverlay {
                         SemanticResultItem(
                             id = "email_$i",
                             category = "Emails",
-                            iconEmoji = "✉️",
+                            iconType = "email",
                             title = linkStr,
                             subtitle = null,
                             bounds = linkItem.bounds,
@@ -4073,7 +4142,7 @@ object ScreenAnalysisOverlay {
                         SemanticResultItem(
                             id = "link_$i",
                             category = "Links",
-                            iconEmoji = "🔗",
+                            iconType = "link",
                             title = linkStr.removePrefix("https://").removePrefix("http://").take(32),
                             subtitle = null,
                             bounds = linkItem.bounds,
@@ -4126,7 +4195,7 @@ object ScreenAnalysisOverlay {
                     SemanticResultItem(
                         id = "address_$i",
                         category = "Addresses",
-                        iconEmoji = "📍",
+                        iconType = "location",
                         title = addrStr.take(32),
                         subtitle = null,
                         bounds = addrItem.bounds,
