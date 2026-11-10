@@ -1650,6 +1650,14 @@ object ScreenAnalysisOverlay {
 
 
 
+    interface InteractiveContentCanvas {
+        fun startZoomInAnimation()
+        fun startZoomOutAnimation(targetButtonY: Float, fromRight: Boolean, onEnd: () -> Unit)
+        fun updateData(details: List<ScreenDetail>, textRegions: List<OcrTextItem>)
+        fun toViewRectF(r: Rect): RectF
+        fun toViewRectF(r: RectF): RectF
+    }
+
     private fun makePanel(
         context: Context,
         details: List<ScreenDetail>,
@@ -1972,19 +1980,16 @@ object ScreenAnalysisOverlay {
 
                 if (isDismissingCanvas) {
                     val dp = dismissProgress.coerceIn(0f, 1f)
-                    val outScale = 1f - dp * 0.88f
-                    val startCenterX = targetOffX + targetDrawW / 2f
-                    val startCenterY = targetOffY + targetDrawH / 2f
-                    val curCenterX = startCenterX + (dismissTargetX - startCenterX) * dp
-                    val curCenterY = startCenterY + (dismissTargetY - startCenterY) * dp
-                    val curDrawW = targetDrawW * outScale
-                    val curDrawH = targetDrawH * outScale
-                    offX = curCenterX - curDrawW / 2f
-                    offY = curCenterY - curDrawH / 2f
+                    // Out-animation: Zoom IN from centered card bounds to fill the screen edge-to-edge
+                    val curDrawW = targetDrawW + (w - targetDrawW) * dp
+                    val curDrawH = targetDrawH + (h - targetDrawH) * dp
+                    offX = targetOffX + (0f - targetOffX) * dp
+                    offY = targetOffY + (0f - targetOffY) * dp
                     scale = if (screenshot.width > 0) curDrawW / screenshot.width else 1f
                     destRect.set(offX, offY, offX + curDrawW, offY + curDrawH)
                 } else {
                     val p = zoomProgress.coerceIn(0f, 1f)
+                    // In-animation: Zoom OUT from 1:1 full screen into centered card
                     val curDrawW = w + (targetDrawW - w) * p
                     val curDrawH = h + (targetDrawH - h) * p
                     offX = 0f + (targetOffX - 0f) * p
@@ -2015,12 +2020,11 @@ object ScreenAnalysisOverlay {
                 dismissAnimator?.cancel()
                 isDismissingCanvas = true
                 dismissProgress = 0f
-                dismissTargetX = if (fromRight) width.toFloat() else 0f
-                dismissTargetY = targetButtonY
 
                 dismissAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 190L
-                    interpolator = android.view.animation.PathInterpolator(0.6f, -0.28f, 0.735f, 0.045f)
+                    duration = 240L
+                    // Smooth fluid decelerate curve: zoom in to fill screen seamlessly
+                    interpolator = android.view.animation.PathInterpolator(0.2f, 0f, 0f, 1f)
                     addUpdateListener {
                         dismissProgress = it.animatedValue as Float
                         applyInterpolatedBounds()
@@ -2307,9 +2311,12 @@ object ScreenAnalysisOverlay {
                 val p = zoomProgress.coerceIn(0f, 1f)
                 val dp = if (isDismissingCanvas) dismissProgress.coerceIn(0f, 1f) else 0f
                 val dismissAlpha = (1f - dp).coerceIn(0f, 1f)
+                val effectiveAlpha = if (isDismissingCanvas) dismissAlpha else p
 
-                // Solid AMOLED black background fading in with zoomProgress
-                val bgAlpha = (255 * p * dismissAlpha).toInt().coerceIn(0, 255)
+                // Solid AMOLED black background:
+                // In-animation: fades from 0 to 255 as card zooms out
+                // Out-animation: fades from 255 down to 0 as card zooms in to live screen
+                val bgAlpha = (255 * effectiveAlpha).toInt().coerceIn(0, 255)
                 canvas.drawColor(Color.argb(bgAlpha, 0, 0, 0))
 
                 if (screenshot != null && !screenshot.isRecycled) {
@@ -2317,15 +2324,16 @@ object ScreenAnalysisOverlay {
                         updateCardBounds(width, height)
                     }
 
-                    val cardRadius = (18f * density) * p
+                    // Corner radius: 18dp when zoomed out into card, 0dp when filling screen
+                    val cardRadius = (18f * density) * effectiveAlpha
                     val cardPath = Path().apply {
                         addRoundRect(destRect, cardRadius, cardRadius, Path.Direction.CW)
                     }
 
                     // Ambient drop shadow under screenshot card
-                    if (p > 0.15f) {
+                    if (effectiveAlpha > 0.08f) {
                         tempPaint.style = Paint.Style.FILL
-                        val shadowA = (140 * p * dismissAlpha).toInt().coerceIn(0, 140)
+                        val shadowA = (140 * effectiveAlpha).toInt().coerceIn(0, 140)
                         tempPaint.color = Color.argb(shadowA, 0, 0, 0)
                         tempPaint.maskFilter = BlurMaskFilter(14f * density, BlurMaskFilter.Blur.NORMAL)
                         canvas.drawRoundRect(destRect, cardRadius, cardRadius, tempPaint)
@@ -2349,7 +2357,7 @@ object ScreenAnalysisOverlay {
 
                     // White subtle grid with 45% max opacity spreading across like a grid and fading out
                     val scanElapsed = now - scanStartTime
-                    if (scanElapsed in 0..1300L) {
+                    if (!isDismissingCanvas && scanElapsed in 0..1300L) {
                         val t = scanElapsed / 1300f
                         val loc = DeviceOrientationHelper.getButtonScreenLocation(context, width.toFloat(), height.toFloat())
                         val ox = loc.x
@@ -2426,13 +2434,15 @@ object ScreenAnalysisOverlay {
 
                     canvas.restore()
 
-                    // Perimeter border around card
-                    tempPaint.shader = null
-                    tempPaint.style = Paint.Style.STROKE
-                    tempPaint.strokeWidth = 1.2f * density
-                    val rimAlpha = if (p > 0.4f) (90 * (p - 0.4f) / 0.6f * dismissAlpha).toInt().coerceIn(0, 90) else 0
-                    tempPaint.color = Color.argb(rimAlpha, 255, 179, 0)
-                    canvas.drawRoundRect(destRect, cardRadius, cardRadius, tempPaint)
+                    // Perimeter border around card (only while zoomed into card)
+                    if (effectiveAlpha > 0.4f && !isDismissingCanvas) {
+                        tempPaint.shader = null
+                        tempPaint.style = Paint.Style.STROKE
+                        tempPaint.strokeWidth = 1.2f * density
+                        val rimAlpha = (90 * (effectiveAlpha - 0.4f) / 0.6f).toInt().coerceIn(0, 90)
+                        tempPaint.color = Color.argb(rimAlpha, 255, 179, 0)
+                        canvas.drawRoundRect(destRect, cardRadius, cardRadius, tempPaint)
+                    }
 
                     // Perfect Geometric Square Snapping: cleanly animates the circled area as a square with 3% lift & ambient shadow
                     if (isSnappingLasso) {
@@ -2570,8 +2580,12 @@ object ScreenAnalysisOverlay {
                         canvas.restore()
                     }
 
+                    val elementsFade = if (isDismissingCanvas) (1f - (dismissProgress / 0.35f)).coerceIn(0f, 1f) else ((p - 0.45f) / 0.55f).coerceIn(0f, 1f)
+                    numberUnderlinePaint.alpha = (255 * elementsFade).toInt().coerceIn(0, 255)
+                    linkBoxPaint.alpha = (220 * elementsFade).toInt().coerceIn(0, 220)
+
                     // 2. Draw Phone Numbers with Light-up, Lift (scale 1.04) and gentle pulsating glow
-                    for (phone in detectedPhoneItems) {
+                    if (elementsFade > 0.01f) for (phone in detectedPhoneItems) {
                         val bx = toViewRectF(phone.bounds)
                         if (phone == selectedTargetItem) {
                             canvas.save()
@@ -2593,7 +2607,7 @@ object ScreenAnalysisOverlay {
                     }
 
                     // 3. Draw Links with animated underline and floating favicon
-                    for (link in detectedLinkItems) {
+                    if (elementsFade > 0.01f) for (link in detectedLinkItems) {
                         val bx = toViewRectF(link.bounds)
                         if (link == selectedTargetItem) {
                             val pulse = 0.5f + 0.5f * kotlin.math.sin(now / 180.0).toFloat()
@@ -5663,103 +5677,41 @@ class GetContentRootLayout(context: Context) : FrameLayout(context) {
         this.isFromRight = fromRight
         this.isMorphing = true
 
-        (interactiveCanvasView as? InteractiveContentCanvas)?.startZoomOutAnimation(buttonCenterY, fromRight) {}
-
-        val w = width.toFloat().coerceAtLeast(1f)
-        val targetX = if (fromRight) w else 0f
-        val pushOffset = if (isFromRight) -14f * density else 14f * density
-
-        val elements = listOfNotNull(actionBubbleLayoutView, miniCardsView, topBarView)
-        val startLocs = elements.map { v ->
-            val cx = v.x + v.width / 2f
-            val cy = v.y + v.height / 2f
-            Triple(v, cx, cy)
+        // Elements smoothly fade out while temp screenshot zooms in to fill the screen exactly
+        val elements = listOfNotNull(actionBubbleLayoutView, miniCardsView, topBarView, findViewWithTag<View>("badges_container"))
+        elements.forEach { v ->
+            v.animate()
+                .alpha(0f)
+                .scaleX(0.92f)
+                .scaleY(0.92f)
+                .setDuration(160L)
+                .setInterpolator(android.view.animation.DecelerateInterpolator())
+                .start()
         }
 
-        // Aggressively accelerated Ease-In curve: cubic-bezier(0.6, -0.28, 0.735, 0.045)
-        val magneticPullInterpolator = android.view.animation.PathInterpolator(0.6f, -0.28f, 0.735f, 0.045f)
+        val canvas = interactiveCanvasView as? InteractiveContentCanvas
+        if (canvas != null) {
+            canvas.startZoomOutAnimation(buttonCenterY, fromRight) {
+                // Re-absorption mechanical haptic click
+                try {
+                    val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                        context.getSystemService(android.os.VibratorManager::class.java)?.defaultVibrator
+                    } else @Suppress("DEPRECATION") context.getSystemService(android.os.Vibrator::class.java)
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                        vibrator?.vibrate(android.os.VibrationEffect.createPredefined(android.os.VibrationEffect.EFFECT_CLICK))
+                    } else @Suppress("DEPRECATION") {
+                        vibrator?.vibrate(18)
+                    }
+                } catch (_: Exception) {}
 
-        val animator = ValueAnimator.ofFloat(1f, 0f).apply {
-            duration = 180L
-            interpolator = magneticPullInterpolator
-            addUpdateListener {
-                val p = it.animatedValue as Float
-                morphProgress = p
-
-                // 1. Structural Collapse: Floating Action Pill, crop box, lasso, cards collapse together into button
-                startLocs.forEach { (view, startX, startY) ->
-                    val pull = 1f - p
-                    view.translationX = (targetX - startX) * pull
-                    view.translationY = (buttonY - startY) * pull
-                    view.scaleX = p
-                    view.scaleY = p
-                    view.alpha = (p * 1.25f).coerceIn(0f, 1f)
-                }
-
-                invalidate()
+                onEnd()
             }
-            addListener(object : AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: Animator) {
-                    // Re-absorption: crisp mechanical click haptic snap
-                    try {
-                        val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-                            context.getSystemService(android.os.VibratorManager::class.java)?.defaultVibrator
-                        } else @Suppress("DEPRECATION") context.getSystemService(android.os.Vibrator::class.java)
-                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                            vibrator?.vibrate(android.os.VibrationEffect.createPredefined(android.os.VibrationEffect.EFFECT_CLICK))
-                        } else @Suppress("DEPRECATION") {
-                            vibrator?.vibrate(18)
-                        }
-                    } catch (_: Exception) {}
-
-                    onEnd()
-                }
-            })
+        } else {
+            onEnd()
         }
-        animator.start()
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val p = morphProgress.coerceIn(0f, 1f)
-        val w = width.toFloat()
-        val h = height.toFloat()
-        if (w <= 0f || h <= 0f) return
-
-        // 1. Backdrop Dimming (Fades in simultaneously)
-        scrimPaint.color = Color.argb((175 * p).toInt(), 10, 10, 14)
-        canvas.drawRect(0f, 0f, w, h, scrimPaint)
-
-        // 2. Morphing Button-to-Panel Shared Element Container
-        if (isMorphing) {
-            val capW = 28f * density
-            val capH = 56f * density
-            val capCorner = 14f * density
-
-            val startRight = if (isFromRight) w else capW
-            val startLeft = if (isFromRight) w - capW else 0f
-            val startTop = (buttonY - capH / 2f).coerceIn(0f, h - capH)
-            val startBottom = startTop + capH
-
-            val curLeft = startLeft + (0f - startLeft) * p
-            val curTop = startTop + (0f - startTop) * p
-            val curRight = startRight + (w - startRight) * p
-            val curBottom = startBottom + (h - startBottom) * p
-            val curCorner = capCorner * (1f - p)
-
-            morphRect.set(curLeft, curTop, curRight, curBottom)
-            morphPath.reset()
-            morphPath.addRoundRect(morphRect, curCorner, curCorner, Path.Direction.CW)
-
-            // Deep obsidian morphing body
-            morphPaint.color = Color.argb((230 * p).toInt(), 14, 14, 18)
-            canvas.drawPath(morphPath, morphPaint)
-
-            // Dynamic Badger yellow morphing contour
-            val borderAlpha = ((255 * (1f - p * 0.4f))).toInt().coerceIn(0, 255)
-            borderPaint.strokeWidth = 2.2f * density * (1f - p * 0.3f)
-            borderPaint.color = Color.argb(borderAlpha, 255, 179, 0)
-            canvas.drawPath(morphPath, borderPaint)
-        }
     }
 }

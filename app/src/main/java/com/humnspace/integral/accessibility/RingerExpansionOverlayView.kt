@@ -115,6 +115,19 @@ class RingerExpansionOverlayView(
         } catch (_: Exception) { Path() }
     }
 
+    private val silentModePath: Path by lazy {
+        try {
+            // Nothing OS Silent mode icon (exact vector contour of Image 1 in 100x100 space)
+            PathParser.createPathFromPathData(
+                "M25.9 2.8 L2.8 25.9 L2.8 27.8 L19.4 44.4 L21.3 48.1 L21.3 51.9 L20.4 53.7 " +
+                "L2.8 71.3 L2.8 73.1 L25.9 96.3 L27.8 96.3 L45.4 78.7 L47.2 78.7 L48.1 77.8 " +
+                "L50.9 77.8 L54.6 79.6 L71.3 96.3 L73.1 96.3 L96.3 73.1 L95.4 70.4 L78.7 53.7 " +
+                "L77.8 51.9 L77.8 47.2 L78.7 45.4 L96.3 27.8 L96.3 25.9 L73.1 2.8 L70.4 3.7 " +
+                "L53.7 20.4 L51.9 21.3 L46.3 21.3 L43.5 18.5 L42.6 18.5 L26.9 2.8 Z"
+            )
+        } catch (_: Exception) { Path() }
+    }
+
     private val capsulePath = Path()
     private val tempRect = RectF()
 
@@ -440,11 +453,14 @@ class RingerExpansionOverlayView(
         val iconSize = 34f * density // Big bold icon
         val scaleF = iconSize / 24f
 
-        val isSilent = (mode == "silent" || iconMorphProgress >= 1.5f)
-        val ringWeight = if (isSilent) 0f else (1f - m).coerceIn(0f, 1f)
-        val vibWeight = if (isSilent) 0f else m.coerceIn(0f, 1f)
+        val ringWeight = (1f - iconMorphProgress).coerceIn(0f, 1f)
+        val vibWeight = when {
+            iconMorphProgress <= 1f -> iconMorphProgress.coerceIn(0f, 1f)
+            else -> (2f - iconMorphProgress).coerceIn(0f, 1f)
+        }
+        val silentWeight = (iconMorphProgress - 1f).coerceIn(0f, 1f)
 
-        // Pure black icons for both Ring and Vibrate
+        // Pure black icons for Ring, Vibrate, and Silent
         if (ringWeight > 0.01f) {
             val rA = (alphaInt * ringWeight).toInt().coerceIn(0, 255)
             iconFillPaint.color = Color.argb(rA, 0, 0, 0)
@@ -506,22 +522,15 @@ class RingerExpansionOverlayView(
             canvas.drawRoundRect(roLeft, -outerH / 2f, roRight, outerH / 2f, outerR, outerR, iconFillPaint)
         }
 
-        if (isSilent) {
-            val sA = alphaInt
+        if (silentWeight > 0.01f) {
+            val sA = (alphaInt * silentWeight).toInt().coerceIn(0, 255)
             iconFillPaint.color = Color.argb(sA, 0, 0, 0)
+            val scaleSilent = (capsuleW * 0.94f) / 100f
             canvas.save()
-            canvas.scale(scaleF, scaleF)
-            canvas.translate(-12f, -12f)
-            canvas.drawPath(ringSoundPath, iconFillPaint)
+            canvas.scale(scaleSilent, scaleSilent)
+            canvas.translate(-50f, -50f)
+            canvas.drawPath(silentModePath, iconFillPaint)
             canvas.restore()
-
-            val slashPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                style = Paint.Style.STROKE
-                color = Color.argb(sA, 0, 0, 0)
-                strokeCap = Paint.Cap.ROUND
-                strokeWidth = 2.4f * density
-            }
-            canvas.drawLine(-11f * density, -11f * density, 11f * density, 10f * density, slashPaint)
         }
 
         canvas.restore()

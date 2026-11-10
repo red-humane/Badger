@@ -327,7 +327,11 @@ class EssentialKeyService : AccessibilityService() {
         val singleAction = prefs.getString(ACTION_SINGLE, prefs.getString(MAPPED_ACTION, ACTION_RINGER))
         if (singleAction != ACTION_RINGER) return
         val audio = getSystemService(AUDIO_SERVICE) as AudioManager
-        val target = if (audio.ringerMode == AudioManager.RINGER_MODE_VIBRATE) "ring" else "vibrate"
+        val target = when (audio.ringerMode) {
+            AudioManager.RINGER_MODE_NORMAL -> "vibrate"
+            AudioManager.RINGER_MODE_VIBRATE -> "silent"
+            else -> "ring"
+        }
         pendingRingerPreview = target
         ScreenAnalysisOverlay.animateAction(this, target)
     }
@@ -386,11 +390,23 @@ class EssentialKeyService : AccessibilityService() {
                 val audio = getSystemService(AUDIO_SERVICE) as AudioManager
                 val currentDisplayMode = ScreenAnalysisOverlay.getCurrentRingerMode()
                 val targetMode = if (currentDisplayMode != null) {
-                    if (currentDisplayMode == "vibrate") "ring" else "vibrate"
+                    when (currentDisplayMode) {
+                        "ring" -> "vibrate"
+                        "vibrate" -> "silent"
+                        else -> "ring"
+                    }
                 } else {
-                    if (audio.ringerMode == AudioManager.RINGER_MODE_VIBRATE) "ring" else "vibrate"
+                    when (audio.ringerMode) {
+                        AudioManager.RINGER_MODE_NORMAL -> "vibrate"
+                        AudioManager.RINGER_MODE_VIBRATE -> "silent"
+                        else -> "ring"
+                    }
                 }
-                val nextSystemMode = if (targetMode == "vibrate") AudioManager.RINGER_MODE_VIBRATE else AudioManager.RINGER_MODE_NORMAL
+                val nextSystemMode = when (targetMode) {
+                    "vibrate" -> AudioManager.RINGER_MODE_VIBRATE
+                    "silent" -> AudioManager.RINGER_MODE_SILENT
+                    else -> AudioManager.RINGER_MODE_NORMAL
+                }
                 try {
                     audio.ringerMode = nextSystemMode
                     // Immediate synchronous overlay display at the exact same instant audio mode changes
