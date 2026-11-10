@@ -1648,16 +1648,6 @@ object ScreenAnalysisOverlay {
         }
     }
 
-
-
-    interface InteractiveContentCanvas {
-        fun startZoomInAnimation()
-        fun startZoomOutAnimation(targetButtonY: Float, fromRight: Boolean, onEnd: () -> Unit)
-        fun updateData(details: List<ScreenDetail>, textRegions: List<OcrTextItem>)
-        fun toViewRectF(r: Rect): RectF
-        fun toViewRectF(r: RectF): RectF
-    }
-
     private fun makePanel(
         context: Context,
         details: List<ScreenDetail>,
@@ -1933,6 +1923,7 @@ object ScreenAnalysisOverlay {
 
             private var zoomProgress = 0f
             private var zoomAnimator: ValueAnimator? = null
+            private var hasStartedZoomIn = false
 
             private var isDismissingCanvas = false
             private var dismissProgress = 0f
@@ -2000,11 +1991,21 @@ object ScreenAnalysisOverlay {
             }
 
             override fun startZoomInAnimation() {
+                hasStartedZoomIn = true
+                val w = width
+                val h = height
+                if (w <= 0 || h <= 0) {
+                    return
+                }
+                if (targetDrawW <= 0f) {
+                    updateCardBounds(w, h)
+                }
                 zoomAnimator?.cancel()
                 zoomProgress = 0f
                 applyInterpolatedBounds()
+                invalidate()
                 zoomAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 320L
+                    duration = 340L
                     interpolator = android.view.animation.PathInterpolator(0.16f, 1f, 0.3f, 1f)
                     addUpdateListener {
                         zoomProgress = it.animatedValue as Float
@@ -2050,6 +2051,24 @@ object ScreenAnalysisOverlay {
             override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
                 super.onSizeChanged(w, h, oldw, oldh)
                 updateCardBounds(w, h)
+                if (!hasStartedZoomIn && w > 0 && h > 0) {
+                    startZoomInAnimation()
+                }
+            }
+
+            override fun onAttachedToWindow() {
+                super.onAttachedToWindow()
+                post {
+                    if (!hasStartedZoomIn && width > 0 && height > 0) {
+                        startZoomInAnimation()
+                    }
+                }
+            }
+
+            override fun onDetachedFromWindow() {
+                zoomAnimator?.cancel()
+                dismissAnimator?.cancel()
+                super.onDetachedFromWindow()
             }
 
             private val touchPoints = mutableListOf<PointF>()
