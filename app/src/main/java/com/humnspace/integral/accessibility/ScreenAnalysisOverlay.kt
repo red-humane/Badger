@@ -1923,7 +1923,8 @@ object ScreenAnalysisOverlay {
 
             private var zoomProgress = 0f
             private var zoomAnimator: ValueAnimator? = null
-            private var hasStartedZoomIn = false
+            private var isZoomingIn = false
+            private var isZoomedInSettled = false
 
             private var isDismissingCanvas = false
             private var dismissProgress = 0f
@@ -1991,15 +1992,17 @@ object ScreenAnalysisOverlay {
             }
 
             override fun startZoomInAnimation() {
-                hasStartedZoomIn = true
                 val w = width
                 val h = height
                 if (w <= 0 || h <= 0) {
+                    // View not measured yet; onSizeChanged will initiate the zoom-out
                     return
                 }
-                if (targetDrawW <= 0f) {
-                    updateCardBounds(w, h)
+                if (isZoomedInSettled || isZoomingIn) {
+                    return
                 }
+                isZoomingIn = true
+                updateCardBounds(w, h)
                 zoomAnimator?.cancel()
                 zoomProgress = 0f
                 applyInterpolatedBounds()
@@ -2012,6 +2015,15 @@ object ScreenAnalysisOverlay {
                         applyInterpolatedBounds()
                         invalidate()
                     }
+                    addListener(object : AnimatorListenerAdapter() {
+                        override fun onAnimationEnd(animation: Animator) {
+                            zoomProgress = 1f
+                            isZoomingIn = false
+                            isZoomedInSettled = true
+                            applyInterpolatedBounds()
+                            invalidate()
+                        }
+                    })
                     start()
                 }
             }
@@ -2051,7 +2063,7 @@ object ScreenAnalysisOverlay {
             override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
                 super.onSizeChanged(w, h, oldw, oldh)
                 updateCardBounds(w, h)
-                if (!hasStartedZoomIn && w > 0 && h > 0) {
+                if (w > 0 && h > 0 && !isZoomedInSettled && !isZoomingIn) {
                     startZoomInAnimation()
                 }
             }
@@ -2059,7 +2071,7 @@ object ScreenAnalysisOverlay {
             override fun onAttachedToWindow() {
                 super.onAttachedToWindow()
                 post {
-                    if (!hasStartedZoomIn && width > 0 && height > 0) {
+                    if (width > 0 && height > 0 && !isZoomedInSettled && !isZoomingIn) {
                         startZoomInAnimation()
                     }
                 }
@@ -2744,7 +2756,15 @@ object ScreenAnalysisOverlay {
             private var isEdgeBackSwipe = false
 
             override fun onTouchEvent(event: MotionEvent): Boolean {
-                if (zoomProgress < 0.85f || isDismissingCanvas) return true
+                if (isDismissingCanvas) return true
+                if (zoomProgress < 1f) {
+                    zoomAnimator?.cancel()
+                    zoomProgress = 1f
+                    isZoomingIn = false
+                    isZoomedInSettled = true
+                    applyInterpolatedBounds()
+                    invalidate()
+                }
                 when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
                         downX = event.x
@@ -3322,7 +3342,9 @@ object ScreenAnalysisOverlay {
         }
 
         // Container for contextual floating inline badges (Events, Addresses)
-        val badgesContainer = FrameLayout(context).apply {
+        val badgesContainer = object : FrameLayout(context) {
+            override fun onTouchEvent(event: MotionEvent): Boolean = false
+        }.apply {
             tag = "badges_container"
         }
 

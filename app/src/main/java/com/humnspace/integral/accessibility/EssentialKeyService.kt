@@ -327,11 +327,7 @@ class EssentialKeyService : AccessibilityService() {
         val singleAction = prefs.getString(ACTION_SINGLE, prefs.getString(MAPPED_ACTION, ACTION_RINGER))
         if (singleAction != ACTION_RINGER) return
         val audio = getSystemService(AUDIO_SERVICE) as AudioManager
-        val target = when (audio.ringerMode) {
-            AudioManager.RINGER_MODE_NORMAL -> "vibrate"
-            AudioManager.RINGER_MODE_VIBRATE -> "silent"
-            else -> "ring"
-        }
+        val target = if (audio.ringerMode == AudioManager.RINGER_MODE_VIBRATE) "ring" else "vibrate"
         pendingRingerPreview = target
         ScreenAnalysisOverlay.animateAction(this, target)
     }
@@ -390,29 +386,17 @@ class EssentialKeyService : AccessibilityService() {
                 val audio = getSystemService(AUDIO_SERVICE) as AudioManager
                 val currentDisplayMode = ScreenAnalysisOverlay.getCurrentRingerMode()
                 val targetMode = if (currentDisplayMode != null) {
-                    when (currentDisplayMode) {
-                        "ring" -> "vibrate"
-                        "vibrate" -> "silent"
-                        else -> "ring"
-                    }
+                    if (currentDisplayMode == "vibrate") "ring" else "vibrate"
                 } else {
-                    when (audio.ringerMode) {
-                        AudioManager.RINGER_MODE_NORMAL -> "vibrate"
-                        AudioManager.RINGER_MODE_VIBRATE -> "silent"
-                        else -> "ring"
-                    }
+                    if (audio.ringerMode == AudioManager.RINGER_MODE_VIBRATE) "ring" else "vibrate"
                 }
-                val nextSystemMode = when (targetMode) {
-                    "vibrate" -> AudioManager.RINGER_MODE_VIBRATE
-                    "silent" -> AudioManager.RINGER_MODE_SILENT
-                    else -> AudioManager.RINGER_MODE_NORMAL
-                }
+                val nextSystemMode = if (targetMode == "vibrate") AudioManager.RINGER_MODE_VIBRATE else AudioManager.RINGER_MODE_NORMAL
                 try {
                     audio.ringerMode = nextSystemMode
                     // Immediate synchronous overlay display at the exact same instant audio mode changes
                     ScreenAnalysisOverlay.showRingerOverlay(this, targetMode)
                 } catch (_: SecurityException) {
-                    showMessage("Ringer mode wasn’t changed", "Android blocked this change under the current Do Not Disturb policy.")
+                    showMessage("Ringer mode wasn’t changed", "Android blocked this change under the current policy.")
                 }
             }
             ACTION_VOICE_SEARCH -> {

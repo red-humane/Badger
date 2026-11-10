@@ -386,11 +386,7 @@ private fun HomeScreen(
             when (selectedAction.id) {
                 EssentialKeyService.ACTION_RINGER -> {
                     val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                    val targetMode = when (audio.ringerMode) {
-                        AudioManager.RINGER_MODE_NORMAL -> "vibrate"
-                        AudioManager.RINGER_MODE_VIBRATE -> "silent"
-                        else -> "ring"
-                    }
+                    val targetMode = if (audio.ringerMode == AudioManager.RINGER_MODE_VIBRATE) "ring" else "vibrate"
                     ScreenAnalysisOverlay.showRingerOverlay(context, targetMode, null)
                 }
                 EssentialKeyService.ACTION_VOICE_SEARCH -> {
@@ -417,11 +413,7 @@ private fun HomeScreen(
                         context = context,
                         onSelectRinger = {
                             val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                            val targetMode = when (audio.ringerMode) {
-                                AudioManager.RINGER_MODE_NORMAL -> "vibrate"
-                                AudioManager.RINGER_MODE_VIBRATE -> "silent"
-                                else -> "ring"
-                            }
+                            val targetMode = if (audio.ringerMode == AudioManager.RINGER_MODE_VIBRATE) "ring" else "vibrate"
                             ScreenAnalysisOverlay.showRingerOverlay(context, targetMode, null)
                         },
                         onSelectGetContent = {

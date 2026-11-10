@@ -55,11 +55,7 @@ class RingerExpansionOverlayView(
     val isCollapsing: Boolean get() = (state == State.COLLAPSING)
 
     private var slideProgress = 0f      // 0f (inside bezel) to 1f (fully expanded)
-    private var iconMorphProgress = when (mode) {
-        "vibrate" -> 1f
-        "silent" -> 2f
-        else -> 0f
-    }
+    private var iconMorphProgress = if (mode == "vibrate") 1f else 0f
     private var iconPulse = 1f
 
     private var slideAnimator: ValueAnimator? = null
@@ -112,19 +108,6 @@ class RingerExpansionOverlayView(
         try {
             // Material Symbols vibration (bold phone + vibration waves, centered 24x24)
             PathParser.createPathFromPathData("M0 15h2V9H0v6zm3 2h2V7H3v10zm19-8v6h2V9h-2zm-3 8h2V7h-2v10zM17 3H7c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 15H7V6h10v12z")
-        } catch (_: Exception) { Path() }
-    }
-
-    private val silentModePath: Path by lazy {
-        try {
-            // Nothing OS Silent mode icon (exact vector contour of Image 1 in 100x100 space)
-            PathParser.createPathFromPathData(
-                "M25.9 2.8 L2.8 25.9 L2.8 27.8 L19.4 44.4 L21.3 48.1 L21.3 51.9 L20.4 53.7 " +
-                "L2.8 71.3 L2.8 73.1 L25.9 96.3 L27.8 96.3 L45.4 78.7 L47.2 78.7 L48.1 77.8 " +
-                "L50.9 77.8 L54.6 79.6 L71.3 96.3 L73.1 96.3 L96.3 73.1 L95.4 70.4 L78.7 53.7 " +
-                "L77.8 51.9 L77.8 47.2 L78.7 45.4 L96.3 27.8 L96.3 25.9 L73.1 2.8 L70.4 3.7 " +
-                "L53.7 20.4 L51.9 21.3 L46.3 21.3 L43.5 18.5 L42.6 18.5 L26.9 2.8 Z"
-            )
         } catch (_: Exception) { Path() }
     }
 
@@ -188,10 +171,8 @@ class RingerExpansionOverlayView(
 
         NothingGlyphController.onRingerChanged()
         when (mode) {
-            "ring" -> IntegralAcoustics.playRingerRing(context)
             "vibrate" -> IntegralAcoustics.playRingerVibrate(context)
-            "silent" -> IntegralAcoustics.playRingerSilent(context)
-            else -> IntegralAcoustics.playOverlayOpen(context)
+            else -> IntegralAcoustics.playRingerRing(context)
         }
 
         var wasCancelled = false
@@ -244,19 +225,14 @@ class RingerExpansionOverlayView(
 
         NothingGlyphController.onRingerChanged()
         when (newMode) {
-            "ring" -> IntegralAcoustics.playRingerRing(context)
             "vibrate" -> IntegralAcoustics.playRingerVibrate(context)
-            "silent" -> IntegralAcoustics.playRingerSilent(context)
+            else -> IntegralAcoustics.playRingerRing(context)
         }
         handler.removeCallbacks(autoDismissRunnable)
         handler.postDelayed(autoDismissRunnable, 900L)
 
         // 180ms Fluid Path & Icon Morph
-        val targetMorph = when (mode) {
-            "vibrate" -> 1f
-            "silent" -> 2f
-            else -> 0f
-        }
+        val targetMorph = if (mode == "vibrate") 1f else 0f
         morphAnimator?.cancel()
         morphAnimator = ValueAnimator.ofFloat(iconMorphProgress, targetMorph).apply {
             duration = BadgerMotionEngine.Timings.ICON_MORPH
@@ -288,11 +264,7 @@ class RingerExpansionOverlayView(
                 if (isDraggingMode) {
                     val dy = event.y - touchStartY
                     val threshold = 28f * density
-                    val targetMode = when {
-                        dy < -threshold -> "ring"
-                        dy > threshold -> "silent"
-                        else -> "vibrate"
-                    }
+                    val targetMode = if (dy > 0) "vibrate" else "ring"
                     if (targetMode != mode) {
                         BadgerMotionEngine.Haptics.performBoundaryDetent(context)
                         updateMode(targetMode)
@@ -317,10 +289,10 @@ class RingerExpansionOverlayView(
     private fun applySystemRinger(targetMode: String) {
         val audio = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
         try {
-            when (targetMode) {
-                "ring" -> audio.ringerMode = AudioManager.RINGER_MODE_NORMAL
-                "vibrate" -> audio.ringerMode = AudioManager.RINGER_MODE_VIBRATE
-                "silent" -> audio.ringerMode = AudioManager.RINGER_MODE_SILENT
+            if (targetMode == "vibrate") {
+                audio.ringerMode = AudioManager.RINGER_MODE_VIBRATE
+            } else {
+                audio.ringerMode = AudioManager.RINGER_MODE_NORMAL
             }
         } catch (_: Exception) {}
     }
@@ -453,14 +425,10 @@ class RingerExpansionOverlayView(
         val iconSize = 34f * density // Big bold icon
         val scaleF = iconSize / 24f
 
-        val ringWeight = (1f - iconMorphProgress).coerceIn(0f, 1f)
-        val vibWeight = when {
-            iconMorphProgress <= 1f -> iconMorphProgress.coerceIn(0f, 1f)
-            else -> (2f - iconMorphProgress).coerceIn(0f, 1f)
-        }
-        val silentWeight = (iconMorphProgress - 1f).coerceIn(0f, 1f)
+        val ringWeight = (1f - m).coerceIn(0f, 1f)
+        val vibWeight = m.coerceIn(0f, 1f)
 
-        // Pure black icons for Ring, Vibrate, and Silent
+        // Pure black icons for Ring and Vibrate
         if (ringWeight > 0.01f) {
             val rA = (alphaInt * ringWeight).toInt().coerceIn(0, 255)
             iconFillPaint.color = Color.argb(rA, 0, 0, 0)
@@ -520,17 +488,6 @@ class RingerExpansionOverlayView(
             val roLeft = riRight + barGap
             val roRight = roLeft + barW
             canvas.drawRoundRect(roLeft, -outerH / 2f, roRight, outerH / 2f, outerR, outerR, iconFillPaint)
-        }
-
-        if (silentWeight > 0.01f) {
-            val sA = (alphaInt * silentWeight).toInt().coerceIn(0, 255)
-            iconFillPaint.color = Color.argb(sA, 0, 0, 0)
-            val scaleSilent = (capsuleW * 0.94f) / 100f
-            canvas.save()
-            canvas.scale(scaleSilent, scaleSilent)
-            canvas.translate(-50f, -50f)
-            canvas.drawPath(silentModePath, iconFillPaint)
-            canvas.restore()
         }
 
         canvas.restore()
