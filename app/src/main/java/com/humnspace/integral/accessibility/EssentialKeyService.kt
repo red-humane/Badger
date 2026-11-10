@@ -511,13 +511,8 @@ class EssentialKeyService : AccessibilityService() {
                                             extractedDetails.add(item.copy(bounds = targetBounds))
                                         }
                                     }
-                                    val blockClassified = ScreenContentAnalyzer.classifyRecognizedText(block.text)
-                                    val blockRect = block.boundingBox ?: android.graphics.Rect()
-                                    for (item in blockClassified) {
-                                        extractedDetails.add(item.copy(bounds = android.graphics.Rect(blockRect)))
-                                    }
                                 }
-                                val finalDetails = ScreenContentAnalyzer.rankAndDeduplicate(nodeDetails + extractedDetails)
+                                val finalDetails = ScreenContentAnalyzer.rankAndDeduplicate(extractedDetails + nodeDetails)
 
                                 // 2. Extract granular word-level items for precision word selection and manual resize
                                 val regions = result.textBlocks.flatMap { block ->

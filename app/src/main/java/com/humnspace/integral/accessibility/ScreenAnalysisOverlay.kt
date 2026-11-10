@@ -13,6 +13,7 @@ import android.graphics.Rect
 import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
+import android.graphics.BlurMaskFilter
 import android.graphics.Paint
 import android.graphics.PointF
 import android.graphics.Path
@@ -1632,24 +1633,29 @@ object ScreenAnalysisOverlay {
 
         // 1. Detected phone numbers
         val detectedPhoneItems = mutableListOf<ScreenTargetItem>()
-        val seenPhones = HashSet<String>()
         fun addPhoneIfValid(numStr: String, bounds: Rect?) {
             if (bounds == null) return
             val cleanDigits = numStr.filter(Char::isDigit)
             if (cleanDigits.length in 7..15) {
                 val key = if (cleanDigits.length >= 10) cleanDigits.takeLast(10) else cleanDigits
-                if (seenPhones.add(key)) {
+                val existing = detectedPhoneItems.firstOrNull {
+                    val d = it.value.filter(Char::isDigit)
+                    (if (d.length >= 10) d.takeLast(10) else d) == key
+                }
+                if (existing == null) {
                     detectedPhoneItems.add(ScreenTargetItem(numStr.trim(), bounds, "phone"))
+                } else {
+                    val exArea = existing.bounds.width().toLong() * existing.bounds.height().toLong()
+                    val newArea = bounds.width().toLong() * bounds.height().toLong()
+                    if (newArea in 1 until exArea) {
+                        val idx = detectedPhoneItems.indexOf(existing)
+                        detectedPhoneItems[idx] = ScreenTargetItem(if (numStr.startsWith("+")) numStr.trim() else existing.value, bounds, "phone")
+                    }
                 }
             }
         }
 
-        for (d in details) {
-            if (d.kind == "Phone number" && d.bounds != null) {
-                addPhoneIfValid(d.value, d.bounds)
-            }
-        }
-
+        // Exact OCR words first for pixel-accurate phone bounds
         for (item in textRegions) {
             val trimmed = item.text.trim()
             ScreenContentAnalyzer.extractPhones(trimmed).forEach { phone ->
@@ -1677,44 +1683,70 @@ object ScreenAnalysisOverlay {
                 line.sortBy { it.bounds.left }
                 val lineStr = line.joinToString(" ") { it.text.trim() }
                 ScreenContentAnalyzer.extractPhones(lineStr).forEach { phone ->
-                    val matching = line.filter { elem ->
-                        val digits = elem.text.filter(Char::isDigit)
-                        digits.isNotEmpty() && phone.contains(digits)
+                    val phoneDigits = phone.filter(Char::isDigit)
+                    var bestMatch: List<OcrTextItem>? = null
+                    for (start in 0 until line.size) {
+                        var accum = ""
+                        for (end in start until line.size) {
+                            accum += line[end].text.filter(Char::isDigit)
+                            if (accum == phoneDigits) {
+                                bestMatch = line.subList(start, end + 1)
+                                break
+                            }
+                            if (accum.length > phoneDigits.length) break
+                        }
+                        if (bestMatch != null) break
                     }
-                    val targetBounds = if (matching.isNotEmpty()) {
-                        val union = Rect(matching.first().bounds)
-                        for (elem in matching.drop(1)) union.union(elem.bounds)
+                    val targetBounds = if (bestMatch != null && bestMatch.isNotEmpty()) {
+                        val union = Rect(bestMatch.first().bounds)
+                        for (elem in bestMatch.drop(1)) union.union(elem.bounds)
                         union
                     } else {
-                        val union = Rect(line.first().bounds)
-                        for (elem in line.drop(1)) union.union(elem.bounds)
-                        union
+                        val matching = line.filter { elem ->
+                            val digits = elem.text.filter(Char::isDigit)
+                            digits.isNotEmpty() && phoneDigits.contains(digits)
+                        }
+                        if (matching.isNotEmpty()) {
+                            val union = Rect(matching.first().bounds)
+                            for (elem in matching.drop(1)) union.union(elem.bounds)
+                            union
+                        } else null
                     }
-                    addPhoneIfValid(phone, targetBounds)
-                }
-            }
-        }
-
-        // 2. Detected links & emails
-        val detectedLinkItems = mutableListOf<ScreenTargetItem>()
-        val seenLinks = HashSet<String>()
-        fun addLinkIfValid(rawUrl: String, bounds: Rect?, isEmail: Boolean = false) {
-            if (bounds == null) return
-            val clean = ScreenContentAnalyzer.cleanUrl(rawUrl) ?: if (isEmail) rawUrl.trim() else null
-            if (clean != null) {
-                val norm = clean.lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/')
-                if (seenLinks.add(norm)) {
-                    detectedLinkItems.add(ScreenTargetItem(clean, bounds, if (isEmail) "email" else "link"))
+                    targetBounds?.let { addPhoneIfValid(phone, it) }
                 }
             }
         }
 
         for (d in details) {
-            if ((d.kind == "Link" || d.kind == "Email") && d.bounds != null) {
-                addLinkIfValid(d.value, d.bounds, d.kind == "Email")
+            if (d.kind == "Phone number" && d.bounds != null) {
+                addPhoneIfValid(d.value, d.bounds)
             }
         }
 
+        // 2. Detected links & emails
+        val detectedLinkItems = mutableListOf<ScreenTargetItem>()
+        fun addLinkIfValid(rawUrl: String, bounds: Rect?, isEmail: Boolean = false) {
+            if (bounds == null) return
+            val clean = ScreenContentAnalyzer.cleanUrl(rawUrl) ?: if (isEmail) rawUrl.trim() else null
+            if (clean != null) {
+                val norm = clean.lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/')
+                val existing = detectedLinkItems.firstOrNull {
+                    it.value.lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/') == norm
+                }
+                if (existing == null) {
+                    detectedLinkItems.add(ScreenTargetItem(clean, bounds, if (isEmail) "email" else "link"))
+                } else {
+                    val exArea = existing.bounds.width().toLong() * existing.bounds.height().toLong()
+                    val newArea = bounds.width().toLong() * bounds.height().toLong()
+                    if (newArea in 1 until exArea) {
+                        val idx = detectedLinkItems.indexOf(existing)
+                        detectedLinkItems[idx] = ScreenTargetItem(clean, bounds, if (isEmail) "email" else "link")
+                    }
+                }
+            }
+        }
+
+        // Exact OCR words first for pixel-accurate link bounds
         for (item in textRegions) {
             val trimmed = item.text.trim()
             ScreenContentAnalyzer.extractLinks(trimmed).forEach { url ->
@@ -1745,35 +1777,58 @@ object ScreenAnalysisOverlay {
                 line.sortBy { it.bounds.left }
                 val lineStr = line.joinToString(" ") { it.text.trim() }
                 ScreenContentAnalyzer.extractLinks(lineStr).forEach { url ->
-                    val matching = line.filter { elem ->
-                        elem.text.isNotEmpty() && url.contains(elem.text.trim(), ignoreCase = true)
+                    val cleanTarget = url.lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/')
+                    var bestMatch: List<OcrTextItem>? = null
+                    for (start in 0 until line.size) {
+                        var accum = ""
+                        for (end in start until line.size) {
+                            accum += line[end].text.trim()
+                            val accumNorm = accum.lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/')
+                            if (accumNorm.contains(cleanTarget) || cleanTarget.contains(accumNorm)) {
+                                if (accumNorm.length >= cleanTarget.length * 0.8) {
+                                    bestMatch = line.subList(start, end + 1)
+                                    break
+                                }
+                            }
+                        }
+                        if (bestMatch != null) break
                     }
-                    val targetBounds = if (matching.isNotEmpty()) {
-                        val union = Rect(matching.first().bounds)
-                        for (elem in matching.drop(1)) union.union(elem.bounds)
+                    val targetBounds = if (bestMatch != null && bestMatch.isNotEmpty()) {
+                        val union = Rect(bestMatch.first().bounds)
+                        for (elem in bestMatch.drop(1)) union.union(elem.bounds)
                         union
-                    } else {
-                        val union = Rect(line.first().bounds)
-                        for (elem in line.drop(1)) union.union(elem.bounds)
-                        union
-                    }
-                    addLinkIfValid(url, targetBounds)
+                    } else null
+                    targetBounds?.let { addLinkIfValid(url, it) }
                 }
                 ScreenContentAnalyzer.extractEmails(lineStr).forEach { email ->
-                    val matching = line.filter { elem ->
-                        elem.text.isNotEmpty() && email.contains(elem.text.trim(), ignoreCase = true)
+                    val normEmail = email.lowercase().trim()
+                    var bestMatch: List<OcrTextItem>? = null
+                    for (start in 0 until line.size) {
+                        var accum = ""
+                        for (end in start until line.size) {
+                            accum += line[end].text.trim()
+                            if (accum.lowercase().contains(normEmail) || normEmail.contains(accum.lowercase())) {
+                                if (accum.length >= normEmail.length * 0.8) {
+                                    bestMatch = line.subList(start, end + 1)
+                                    break
+                                }
+                            }
+                        }
+                        if (bestMatch != null) break
                     }
-                    val targetBounds = if (matching.isNotEmpty()) {
-                        val union = Rect(matching.first().bounds)
-                        for (elem in matching.drop(1)) union.union(elem.bounds)
+                    val targetBounds = if (bestMatch != null && bestMatch.isNotEmpty()) {
+                        val union = Rect(bestMatch.first().bounds)
+                        for (elem in bestMatch.drop(1)) union.union(elem.bounds)
                         union
-                    } else {
-                        val union = Rect(line.first().bounds)
-                        for (elem in line.drop(1)) union.union(elem.bounds)
-                        union
-                    }
-                    addLinkIfValid(email, targetBounds, isEmail = true)
+                    } else null
+                    targetBounds?.let { addLinkIfValid(email, it, isEmail = true) }
                 }
+            }
+        }
+
+        for (d in details) {
+            if ((d.kind == "Link" || d.kind == "Email") && d.bounds != null) {
+                addLinkIfValid(d.value, d.bounds, d.kind == "Email")
             }
         }
 
@@ -2074,6 +2129,44 @@ object ScreenAnalysisOverlay {
             private var offX = 0f
             private var offY = 0f
 
+            fun toViewRectF(r: Rect): RectF = RectF(
+                offX + r.left * scale,
+                offY + r.top * scale,
+                offX + r.right * scale,
+                offY + r.bottom * scale
+            )
+
+            fun toViewRectF(r: RectF): RectF = RectF(
+                offX + r.left * scale,
+                offY + r.top * scale,
+                offX + r.right * scale,
+                offY + r.bottom * scale
+            )
+
+            fun toViewX(x: Float): Float = offX + x * scale
+            fun toViewY(y: Float): Float = offY + y * scale
+
+            fun updateCardBounds(w: Int, h: Int) {
+                if (screenshot == null || screenshot.isRecycled || w <= 0 || h <= 0) return
+                val topReserve = 82f * density
+                val bottomReserve = 146f * density
+                val sideReserve = 20f * density
+                val availW = (w.toFloat() - sideReserve * 2f).coerceAtLeast(100f)
+                val availH = (h.toFloat() - topReserve - bottomReserve).coerceAtLeast(100f)
+                val fitScale = minOf(availW / screenshot.width, availH / screenshot.height)
+                scale = fitScale * 0.94f
+                val drawW = screenshot.width * scale
+                val drawH = screenshot.height * scale
+                offX = (w.toFloat() - drawW) / 2f
+                offY = topReserve + (availH - drawH) / 2f
+                destRect.set(offX, offY, offX + drawW, offY + drawH)
+            }
+
+            override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+                super.onSizeChanged(w, h, oldw, oldh)
+                updateCardBounds(w, h)
+            }
+
             private val touchPoints = mutableListOf<PointF>()
             private var downX = 0f
             private var downY = 0f
@@ -2237,6 +2330,7 @@ object ScreenAnalysisOverlay {
 
             init {
                 setLayerType(LAYER_TYPE_HARDWARE, null)
+                updateCardBounds(screenW, screenH)
             }
 
             private fun drawPreciseSelectionBox(canvas: Canvas, rect: RectF) {
@@ -2329,15 +2423,30 @@ object ScreenAnalysisOverlay {
                 super.onDraw(canvas)
                 val now = System.currentTimeMillis()
 
-                if (screenshot != null && !screenshot.isRecycled) {
-                    scale = minOf(width.toFloat() / screenshot.width, height.toFloat() / screenshot.height)
-                    val drawW = screenshot.width * scale
-                    val drawH = screenshot.height * scale
-                    offX = (width - drawW) / 2f
-                    offY = (height - drawH) / 2f
-                    destRect.set(offX, offY, offX + drawW, offY + drawH)
+                // Solid AMOLED black background for workspace
+                canvas.drawColor(Color.BLACK)
 
-                    // Draw base screenshot: monochrome grayscale if an image is squared, else full color
+                if (screenshot != null && !screenshot.isRecycled) {
+                    if (destRect.isEmpty) {
+                        updateCardBounds(width, height)
+                    }
+
+                    val cardRadius = 18f * density
+                    val cardPath = Path().apply {
+                        addRoundRect(destRect, cardRadius, cardRadius, Path.Direction.CW)
+                    }
+
+                    // Ambient drop shadow under screenshot card
+                    tempPaint.style = Paint.Style.FILL
+                    tempPaint.color = Color.argb(140, 0, 0, 0)
+                    tempPaint.maskFilter = BlurMaskFilter(14f * density, BlurMaskFilter.Blur.NORMAL)
+                    canvas.drawRoundRect(destRect, cardRadius, cardRadius, tempPaint)
+                    tempPaint.maskFilter = null
+
+                    // Draw base screenshot clipped inside the card
+                    canvas.save()
+                    canvas.clipPath(cardPath)
+
                     val hasSquaredImage = (selectedCropRect != null || isSnappingLasso)
                     if (hasSquaredImage) {
                         paint.colorFilter = grayscaleColorFilter
@@ -2391,16 +2500,16 @@ object ScreenAnalysisOverlay {
                             tempPaint.strokeWidth = gridStroke
 
                             // Vertical grid lines
-                            var gx = 0f
-                            while (gx <= width.toFloat()) {
-                                canvas.drawLine(gx, 0f, gx, height.toFloat(), tempPaint)
+                            var gx = destRect.left
+                            while (gx <= destRect.right) {
+                                canvas.drawLine(gx, destRect.top, gx, destRect.bottom, tempPaint)
                                 gx += gridStep
                             }
 
                             // Horizontal grid lines
-                            var gy = 0f
-                            while (gy <= height.toFloat()) {
-                                canvas.drawLine(0f, gy, width.toFloat(), gy, tempPaint)
+                            var gy = destRect.top
+                            while (gy <= destRect.bottom) {
+                                canvas.drawLine(destRect.left, gy, destRect.right, gy, tempPaint)
                                 gy += gridStep
                             }
 
@@ -2411,10 +2520,10 @@ object ScreenAnalysisOverlay {
                             tempPaint.color = Color.argb(dotAlpha, 255, 255, 255)
                             val dotR = 1.2f * density
 
-                            gx = 0f
-                            while (gx <= width.toFloat()) {
-                                gy = 0f
-                                while (gy <= height.toFloat()) {
+                            gx = destRect.left
+                            while (gx <= destRect.right) {
+                                gy = destRect.top
+                                while (gy <= destRect.bottom) {
                                     val d = kotlin.math.hypot((gx - ox).toDouble(), (gy - oy).toDouble()).toFloat()
                                     if (d <= waveRadius) {
                                         canvas.drawCircle(gx, gy, dotR, tempPaint)
@@ -2425,6 +2534,15 @@ object ScreenAnalysisOverlay {
                             }
                         }
                     }
+
+                    canvas.restore()
+
+                    // Perimeter border around card
+                    tempPaint.shader = null
+                    tempPaint.style = Paint.Style.STROKE
+                    tempPaint.strokeWidth = 1.2f * density
+                    tempPaint.color = Color.argb(90, 255, 179, 0)
+                    canvas.drawRoundRect(destRect, cardRadius, cardRadius, tempPaint)
 
                     // Perfect Geometric Square Snapping: cleanly animates the circled area as a square with 3% lift & ambient shadow
                     if (isSnappingLasso) {
@@ -2564,8 +2682,7 @@ object ScreenAnalysisOverlay {
 
                     // 2. Draw Phone Numbers with Light-up, Lift (scale 1.04) and gentle pulsating glow
                     for (phone in detectedPhoneItems) {
-                        val r = phone.bounds
-                        val bx = RectF(r.left.toFloat(), r.top.toFloat(), r.right.toFloat(), r.bottom.toFloat())
+                        val bx = toViewRectF(phone.bounds)
                         if (phone == selectedTargetItem) {
                             canvas.save()
                             val pulse = 0.5f + 0.5f * kotlin.math.sin(now / 170.0).toFloat()
@@ -2587,8 +2704,7 @@ object ScreenAnalysisOverlay {
 
                     // 3. Draw Links with animated underline and floating favicon
                     for (link in detectedLinkItems) {
-                        val r = link.bounds
-                        val bx = RectF(r.left.toFloat(), r.top.toFloat(), r.right.toFloat(), r.bottom.toFloat())
+                        val bx = toViewRectF(link.bounds)
                         if (link == selectedTargetItem) {
                             val pulse = 0.5f + 0.5f * kotlin.math.sin(now / 180.0).toFloat()
                             // Sleek animated underline
@@ -2612,8 +2728,7 @@ object ScreenAnalysisOverlay {
 
                     // Source Position Anchor: Clearly highlights source position on screen
                     if (selectedTargetItem != null) {
-                        val r = selectedTargetItem!!.bounds
-                        val bx = RectF(r.left.toFloat(), r.top.toFloat(), r.right.toFloat(), r.bottom.toFloat())
+                        val bx = toViewRectF(selectedTargetItem!!.bounds)
                         val padH = 4f * density
                         val padV = 3f * density
                         val anchorRect = RectF(bx.left - padH, bx.top - padV, bx.right + padH, bx.bottom + padV)
@@ -2656,10 +2771,9 @@ object ScreenAnalysisOverlay {
                         canvas.drawRoundRect(bandRect, 5f * density, 5f * density, tempPaint)
                     } else {
                         for (item in textRegions.take(30)) {
-                            val r = item.bounds
-                            val bx = RectF(r.left.toFloat(), r.top.toFloat(), r.right.toFloat(), r.bottom.toFloat())
-                            val isPhone = detectedPhoneItems.any { Rect.intersects(it.bounds, r) }
-                            val isLink = detectedLinkItems.any { Rect.intersects(it.bounds, r) }
+                            val bx = toViewRectF(item.bounds)
+                            val isPhone = detectedPhoneItems.any { Rect.intersects(it.bounds, item.bounds) }
+                            val isLink = detectedLinkItems.any { Rect.intersects(it.bounds, item.bounds) }
                             if (!isPhone && !isLink) {
                                 drawSubtleYellowLightReflection(canvas, bx, now)
                             }
@@ -3039,32 +3153,20 @@ object ScreenAnalysisOverlay {
 
                             // 1. Check Phone Numbers
                             val clickedPhone = detectedPhoneItems.firstOrNull { item ->
-                                val b = item.bounds
-                                val left = offX + b.left * scale
-                                val top = offY + b.top * scale
-                                val right = offX + b.right * scale
-                                val bottom = offY + b.bottom * scale
-                                tx in (left - 8f * density)..(right + 8f * density) && ty in (top - 8f * density)..(bottom + 8f * density)
+                                val bx = toViewRectF(item.bounds)
+                                tx in (bx.left - 8f * density)..(bx.right + 8f * density) && ty in (bx.top - 8f * density)..(bx.bottom + 8f * density)
                             }
 
                             // 2. Check Links
                             val clickedLink = detectedLinkItems.firstOrNull { item ->
-                                val b = item.bounds
-                                val left = offX + b.left * scale
-                                val top = offY + b.top * scale
-                                val right = offX + b.right * scale
-                                val bottom = offY + b.bottom * scale
-                                tx in (left - 8f * density)..(right + 8f * density) && ty in (top - 8f * density)..(bottom + 8f * density)
+                                val bx = toViewRectF(item.bounds)
+                                tx in (bx.left - 8f * density)..(bx.right + 8f * density) && ty in (bx.top - 8f * density)..(bx.bottom + 8f * density)
                             }
 
                             // 3. Check Text words
                             val clickedWord = textRegions.filter { item ->
-                                val b = item.bounds
-                                val left = offX + b.left * scale
-                                val top = offY + b.top * scale
-                                val right = offX + b.right * scale
-                                val bottom = offY + b.bottom * scale
-                                tx in (left - 6f * density)..(right + 6f * density) && ty in (top - 6f * density)..(bottom + 6f * density)
+                                val bx = toViewRectF(item.bounds)
+                                tx in (bx.left - 6f * density)..(bx.right + 6f * density) && ty in (bx.top - 6f * density)..(bx.bottom + 6f * density)
                             }.minByOrNull { it.bounds.width().toLong() * it.bounds.height().toLong() }
 
                             when {
@@ -3073,8 +3175,7 @@ object ScreenAnalysisOverlay {
                                     activeTextRect = null
                                     selectedCropRect = null
                                     selectedTargetItem = clickedPhone
-                                    val r = clickedPhone.bounds
-                                    val bx = RectF(r.left.toFloat(), r.top.toFloat(), r.right.toFloat(), r.bottom.toFloat())
+                                    val bx = toViewRectF(clickedPhone.bounds)
                                     val num = clickedPhone.value.trim()
                                     showActionMenu(bx, listOf(
                                         ActionBubbleItem("Call") {
@@ -3132,8 +3233,7 @@ object ScreenAnalysisOverlay {
                                     activeTextRect = null
                                     selectedCropRect = null
                                     selectedTargetItem = clickedLink
-                                    val r = clickedLink.bounds
-                                    val bx = RectF(r.left.toFloat(), r.top.toFloat(), r.right.toFloat(), r.bottom.toFloat())
+                                    val bx = toViewRectF(clickedLink.bounds)
                                     val raw = clickedLink.value.trim()
                                     val isEmail = clickedLink.type == "email" || raw.contains("@")
                                     val openActionTitle = if (isEmail) "Send Email" else "Open Link"
@@ -3170,8 +3270,7 @@ object ScreenAnalysisOverlay {
                                     IntegralAcoustics.playItemSelect(context)
                                     selectedTargetItem = null
                                     selectedCropRect = null
-                                    val r = clickedWord.bounds
-                                    val bx = RectF(r.left.toFloat(), r.top.toFloat(), r.right.toFloat(), r.bottom.toFloat())
+                                    val bx = toViewRectF(clickedWord.bounds)
                                     activeTextRect = bx
                                     val wordText = clickedWord.text.trim()
                                     showActionMenu(bx, listOf(
@@ -3689,8 +3788,7 @@ object ScreenAnalysisOverlay {
                     selectedTargetItem = ScreenTargetItem(item.title, item.bounds, item.category)
                     interactiveCanvas.invalidate()
 
-                    val r = item.bounds
-                    val bx = RectF(r.left.toFloat(), r.top.toFloat(), r.right.toFloat(), r.bottom.toFloat())
+                    val bx = interactiveCanvas.toViewRectF(item.bounds)
                     showActionMenu(bx, item.actions)
                 }
             }
@@ -3800,12 +3898,13 @@ object ScreenAnalysisOverlay {
 
             val badgeLp = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT)
             val badgeWEstimate = dp(120)
-            if (ev.bounds.right + badgeWEstimate + dp(12) <= screenW) {
-                badgeLp.leftMargin = ev.bounds.right + dp(6)
-                badgeLp.topMargin = (ev.bounds.centerY() - dp(13)).coerceIn(dp(64), screenH - dp(120))
+            val vBounds = interactiveCanvas.toViewRectF(ev.bounds)
+            if (vBounds.right + badgeWEstimate + dp(12) <= screenW) {
+                badgeLp.leftMargin = (vBounds.right + dp(6)).toInt()
+                badgeLp.topMargin = (vBounds.centerY() - dp(13)).toInt().coerceIn(dp(64), screenH - dp(120))
             } else {
-                badgeLp.leftMargin = ev.bounds.left.coerceIn(dp(12), screenW - badgeWEstimate - dp(12))
-                badgeLp.topMargin = (ev.bounds.top - dp(32)).coerceIn(dp(64), screenH - dp(120))
+                badgeLp.leftMargin = vBounds.left.toInt().coerceIn(dp(12), screenW - badgeWEstimate - dp(12))
+                badgeLp.topMargin = (vBounds.top - dp(32)).toInt().coerceIn(dp(64), screenH - dp(120))
             }
             rootLayout.addView(eventBadge, badgeLp)
         }
@@ -3868,12 +3967,13 @@ object ScreenAnalysisOverlay {
 
             val badgeLp = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT)
             val badgeWEstimate = dp(105)
-            if (addrItem.bounds.right + badgeWEstimate + dp(12) <= screenW) {
-                badgeLp.leftMargin = addrItem.bounds.right + dp(6)
-                badgeLp.topMargin = (addrItem.bounds.centerY() - dp(13)).coerceIn(dp(64), screenH - dp(120))
+            val vBounds = interactiveCanvas.toViewRectF(addrItem.bounds)
+            if (vBounds.right + badgeWEstimate + dp(12) <= screenW) {
+                badgeLp.leftMargin = (vBounds.right + dp(6)).toInt()
+                badgeLp.topMargin = (vBounds.centerY() - dp(13)).toInt().coerceIn(dp(64), screenH - dp(120))
             } else {
-                badgeLp.leftMargin = addrItem.bounds.left.coerceIn(dp(12), screenW - badgeWEstimate - dp(12))
-                badgeLp.topMargin = (addrItem.bounds.top - dp(32)).coerceIn(dp(64), screenH - dp(120))
+                badgeLp.leftMargin = vBounds.left.toInt().coerceIn(dp(12), screenW - badgeWEstimate - dp(12))
+                badgeLp.topMargin = (vBounds.top - dp(32)).toInt().coerceIn(dp(64), screenH - dp(120))
             }
             rootLayout.addView(addrBadge, badgeLp)
         }

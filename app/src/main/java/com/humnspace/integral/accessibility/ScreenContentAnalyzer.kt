@@ -282,8 +282,8 @@ object ScreenContentAnalyzer {
         val textCandidates = mutableListOf<ScreenDetail>()
 
         val seenPhones = HashMap<String, ScreenDetail>()
-        val seenLinks = HashSet<String>()
-        val seenEmails = HashSet<String>()
+        val seenLinksMap = HashMap<String, ScreenDetail>()
+        val seenEmailsMap = HashMap<String, ScreenDetail>()
         val seenAddresses = HashSet<String>()
         val seenGeneral = HashSet<String>()
 
@@ -293,20 +293,29 @@ object ScreenContentAnalyzer {
                     val digits = item.value.filter(Char::isDigit)
                     val key = if (digits.length >= 10) digits.takeLast(10) else digits
                     val existing = seenPhones[key]
-                    if (existing == null || (item.value.startsWith("+") && !existing.value.startsWith("+"))) {
+                    val isTighter = existing?.bounds != null && item.bounds != null &&
+                        (item.bounds.width().toLong() * item.bounds.height().toLong() < existing.bounds.width().toLong() * existing.bounds.height().toLong())
+                    if (existing == null || (item.value.startsWith("+") && !existing.value.startsWith("+")) || isTighter) {
                         seenPhones[key] = item
                     }
                 }
                 "Link" -> {
                     val normUrl = item.value.trim().lowercase()
                         .removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/')
-                    if (seenLinks.add(normUrl)) {
-                        nonTextItems.add(item)
+                    val existing = seenLinksMap[normUrl]
+                    val isTighter = existing?.bounds != null && item.bounds != null &&
+                        (item.bounds.width().toLong() * item.bounds.height().toLong() < existing.bounds.width().toLong() * existing.bounds.height().toLong())
+                    if (existing == null || isTighter) {
+                        seenLinksMap[normUrl] = item
                     }
                 }
                 "Email" -> {
-                    if (seenEmails.add(item.value.trim().lowercase())) {
-                        nonTextItems.add(item)
+                    val normEmail = item.value.trim().lowercase()
+                    val existing = seenEmailsMap[normEmail]
+                    val isTighter = existing?.bounds != null && item.bounds != null &&
+                        (item.bounds.width().toLong() * item.bounds.height().toLong() < existing.bounds.width().toLong() * existing.bounds.height().toLong())
+                    if (existing == null || isTighter) {
+                        seenEmailsMap[normEmail] = item
                     }
                 }
                 "Address" -> {
@@ -326,6 +335,8 @@ object ScreenContentAnalyzer {
             }
         }
         nonTextItems.addAll(seenPhones.values)
+        nonTextItems.addAll(seenLinksMap.values)
+        nonTextItems.addAll(seenEmailsMap.values)
 
         val cleanedTextItems = mutableListOf<ScreenDetail>()
         val sortedCandidates = textCandidates.sortedByDescending { it.value.length }
