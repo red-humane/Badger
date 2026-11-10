@@ -52,6 +52,14 @@ import com.humnspace.integral.R
 /** A temporary, touchable results sheet with a touch-through perimeter animation. */
 // Gesture ripple and comet tail nodes for ScreenAnalysis
 data class GestureTrailNode(val x: Float, val y: Float, val time: Long)
+interface InteractiveContentCanvas {
+    fun startZoomInAnimation()
+    fun startZoomOutAnimation(targetButtonY: Float, fromRight: Boolean, onEnd: () -> Unit)
+    fun updateData(details: List<ScreenDetail>, textRegions: List<OcrTextItem>)
+    fun toViewRectF(r: Rect): RectF
+    fun toViewRectF(r: RectF): RectF
+}
+
 object ScreenAnalysisOverlay {
     private var windowManager: WindowManager? = null
     private var glowView: View? = null
@@ -194,6 +202,34 @@ object ScreenAnalysisOverlay {
         return generation
     }
 
+    fun showInstantContent(service: AccessibilityService, screenshot: Bitmap): Int {
+        dismiss()
+        val generation = ++overlayGeneration
+        val manager = service.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        windowManager = manager
+        activeService = service
+        activeScreenshot = screenshot
+        pendingScreenshot = null
+        NothingGlyphController.startGetContentGlyph()
+        val panel = makePanel(service, emptyList(), screenshot, emptyList(), onRescan = { (service as? EssentialKeyService)?.rescanContent() })
+        panelView = panel
+        resultsPanel = panel
+        revealPanel(manager, service, panel)
+        return generation
+    }
+
+    fun updateContentDetails(token: Int, service: AccessibilityService, details: List<ScreenDetail>, textRegions: List<OcrTextItem>) {
+        if (overlayGeneration != token) return
+        val root = (panelView as? ViewGroup) ?: return
+        val getContentRoot = (root as? GetContentRootLayout)
+            ?: root.findViewWithTag<GetContentRootLayout>("contextual_overlay")
+            ?: return
+
+        getContentRoot.populateRecognizedContent(details, textRegions)
+        NothingGlyphController.onContentExtracted()
+        IntegralAcoustics.playContentDetected(service)
+    }
+
     fun completeScan(token: Int, service: AccessibilityService, details: List<ScreenDetail>, screenshot: Bitmap?, textRegions: List<OcrTextItem>, titleText: String = "Get Content", subtitleText: String = "Choose an action") {
         if (overlayGeneration != token) { screenshot?.takeIf { !it.isRecycled }?.recycle(); return }
         val manager = windowManager ?: (service.getSystemService(Context.WINDOW_SERVICE) as WindowManager)
@@ -319,9 +355,14 @@ object ScreenAnalysisOverlay {
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                if (isContextual) {
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                } else {
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                },
                 android.graphics.PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
@@ -1607,6 +1648,8 @@ object ScreenAnalysisOverlay {
         }
     }
 
+
+
     private fun makePanel(
         context: Context,
         details: List<ScreenDetail>,
@@ -1631,268 +1674,13 @@ object ScreenAnalysisOverlay {
 
         var currentMode = ContentMode.TEXT
 
-        // 1. Detected phone numbers
+        val activeDetails = mutableListOf<ScreenDetail>()
+        val activeTextRegions = mutableListOf<OcrTextItem>()
         val detectedPhoneItems = mutableListOf<ScreenTargetItem>()
-        fun addPhoneIfValid(numStr: String, bounds: Rect?) {
-            if (bounds == null) return
-            val cleanDigits = numStr.filter(Char::isDigit)
-            if (cleanDigits.length in 7..15) {
-                val key = if (cleanDigits.length >= 10) cleanDigits.takeLast(10) else cleanDigits
-                val existing = detectedPhoneItems.firstOrNull {
-                    val d = it.value.filter(Char::isDigit)
-                    (if (d.length >= 10) d.takeLast(10) else d) == key
-                }
-                if (existing == null) {
-                    detectedPhoneItems.add(ScreenTargetItem(numStr.trim(), bounds, "phone"))
-                } else {
-                    val exArea = existing.bounds.width().toLong() * existing.bounds.height().toLong()
-                    val newArea = bounds.width().toLong() * bounds.height().toLong()
-                    if (newArea in 1 until exArea) {
-                        val idx = detectedPhoneItems.indexOf(existing)
-                        detectedPhoneItems[idx] = ScreenTargetItem(if (numStr.startsWith("+")) numStr.trim() else existing.value, bounds, "phone")
-                    }
-                }
-            }
-        }
-
-        // Exact OCR words first for pixel-accurate phone bounds
-        for (item in textRegions) {
-            val trimmed = item.text.trim()
-            ScreenContentAnalyzer.extractPhones(trimmed).forEach { phone ->
-                addPhoneIfValid(phone, item.bounds)
-            }
-        }
-
-        // Reconstruct line clusters from textRegions to catch multi-word phone numbers
-        if (textRegions.size >= 2) {
-            val sortedRegions = textRegions.sortedWith(compareBy<OcrTextItem> { it.bounds.top }.thenBy { it.bounds.left })
-            val lineClusters = mutableListOf<MutableList<OcrTextItem>>()
-            for (w in sortedRegions) {
-                val cy = w.bounds.exactCenterY()
-                val line = lineClusters.firstOrNull { cluster ->
-                    val avgY = cluster.map { it.bounds.exactCenterY() }.average()
-                    kotlin.math.abs(cy - avgY) <= (14f * density)
-                }
-                if (line != null) {
-                    line.add(w)
-                } else {
-                    lineClusters.add(mutableListOf(w))
-                }
-            }
-            for (line in lineClusters) {
-                line.sortBy { it.bounds.left }
-                val lineStr = line.joinToString(" ") { it.text.trim() }
-                ScreenContentAnalyzer.extractPhones(lineStr).forEach { phone ->
-                    val phoneDigits = phone.filter(Char::isDigit)
-                    var bestMatch: List<OcrTextItem>? = null
-                    for (start in 0 until line.size) {
-                        var accum = ""
-                        for (end in start until line.size) {
-                            accum += line[end].text.filter(Char::isDigit)
-                            if (accum == phoneDigits) {
-                                bestMatch = line.subList(start, end + 1)
-                                break
-                            }
-                            if (accum.length > phoneDigits.length) break
-                        }
-                        if (bestMatch != null) break
-                    }
-                    val targetBounds = if (bestMatch != null && bestMatch.isNotEmpty()) {
-                        val union = Rect(bestMatch.first().bounds)
-                        for (elem in bestMatch.drop(1)) union.union(elem.bounds)
-                        union
-                    } else {
-                        val matching = line.filter { elem ->
-                            val digits = elem.text.filter(Char::isDigit)
-                            digits.isNotEmpty() && phoneDigits.contains(digits)
-                        }
-                        if (matching.isNotEmpty()) {
-                            val union = Rect(matching.first().bounds)
-                            for (elem in matching.drop(1)) union.union(elem.bounds)
-                            union
-                        } else null
-                    }
-                    targetBounds?.let { addPhoneIfValid(phone, it) }
-                }
-            }
-        }
-
-        for (d in details) {
-            if (d.kind == "Phone number" && d.bounds != null) {
-                addPhoneIfValid(d.value, d.bounds)
-            }
-        }
-
-        // 2. Detected links & emails
         val detectedLinkItems = mutableListOf<ScreenTargetItem>()
-        fun addLinkIfValid(rawUrl: String, bounds: Rect?, isEmail: Boolean = false) {
-            if (bounds == null) return
-            val clean = ScreenContentAnalyzer.cleanUrl(rawUrl) ?: if (isEmail) rawUrl.trim() else null
-            if (clean != null) {
-                val norm = clean.lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/')
-                val existing = detectedLinkItems.firstOrNull {
-                    it.value.lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/') == norm
-                }
-                if (existing == null) {
-                    detectedLinkItems.add(ScreenTargetItem(clean, bounds, if (isEmail) "email" else "link"))
-                } else {
-                    val exArea = existing.bounds.width().toLong() * existing.bounds.height().toLong()
-                    val newArea = bounds.width().toLong() * bounds.height().toLong()
-                    if (newArea in 1 until exArea) {
-                        val idx = detectedLinkItems.indexOf(existing)
-                        detectedLinkItems[idx] = ScreenTargetItem(clean, bounds, if (isEmail) "email" else "link")
-                    }
-                }
-            }
-        }
-
-        // Exact OCR words first for pixel-accurate link bounds
-        for (item in textRegions) {
-            val trimmed = item.text.trim()
-            ScreenContentAnalyzer.extractLinks(trimmed).forEach { url ->
-                addLinkIfValid(url, item.bounds)
-            }
-            ScreenContentAnalyzer.extractEmails(trimmed).forEach { email ->
-                addLinkIfValid(email, item.bounds, isEmail = true)
-            }
-        }
-
-        // Reconstruct line clusters from textRegions to catch multi-token URLs
-        if (textRegions.size >= 2) {
-            val sortedRegions = textRegions.sortedWith(compareBy<OcrTextItem> { it.bounds.top }.thenBy { it.bounds.left })
-            val lineClusters = mutableListOf<MutableList<OcrTextItem>>()
-            for (w in sortedRegions) {
-                val cy = w.bounds.exactCenterY()
-                val line = lineClusters.firstOrNull { cluster ->
-                    val avgY = cluster.map { it.bounds.exactCenterY() }.average()
-                    kotlin.math.abs(cy - avgY) <= (14f * density)
-                }
-                if (line != null) {
-                    line.add(w)
-                } else {
-                    lineClusters.add(mutableListOf(w))
-                }
-            }
-            for (line in lineClusters) {
-                line.sortBy { it.bounds.left }
-                val lineStr = line.joinToString(" ") { it.text.trim() }
-                ScreenContentAnalyzer.extractLinks(lineStr).forEach { url ->
-                    val cleanTarget = url.lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/')
-                    var bestMatch: List<OcrTextItem>? = null
-                    for (start in 0 until line.size) {
-                        var accum = ""
-                        for (end in start until line.size) {
-                            accum += line[end].text.trim()
-                            val accumNorm = accum.lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/')
-                            if (accumNorm.contains(cleanTarget) || cleanTarget.contains(accumNorm)) {
-                                if (accumNorm.length >= cleanTarget.length * 0.8) {
-                                    bestMatch = line.subList(start, end + 1)
-                                    break
-                                }
-                            }
-                        }
-                        if (bestMatch != null) break
-                    }
-                    val targetBounds = if (bestMatch != null && bestMatch.isNotEmpty()) {
-                        val union = Rect(bestMatch.first().bounds)
-                        for (elem in bestMatch.drop(1)) union.union(elem.bounds)
-                        union
-                    } else null
-                    targetBounds?.let { addLinkIfValid(url, it) }
-                }
-                ScreenContentAnalyzer.extractEmails(lineStr).forEach { email ->
-                    val normEmail = email.lowercase().trim()
-                    var bestMatch: List<OcrTextItem>? = null
-                    for (start in 0 until line.size) {
-                        var accum = ""
-                        for (end in start until line.size) {
-                            accum += line[end].text.trim()
-                            if (accum.lowercase().contains(normEmail) || normEmail.contains(accum.lowercase())) {
-                                if (accum.length >= normEmail.length * 0.8) {
-                                    bestMatch = line.subList(start, end + 1)
-                                    break
-                                }
-                            }
-                        }
-                        if (bestMatch != null) break
-                    }
-                    val targetBounds = if (bestMatch != null && bestMatch.isNotEmpty()) {
-                        val union = Rect(bestMatch.first().bounds)
-                        for (elem in bestMatch.drop(1)) union.union(elem.bounds)
-                        union
-                    } else null
-                    targetBounds?.let { addLinkIfValid(email, it, isEmail = true) }
-                }
-            }
-        }
-
-        for (d in details) {
-            if ((d.kind == "Link" || d.kind == "Email") && d.bounds != null) {
-                addLinkIfValid(d.value, d.bounds, d.kind == "Email")
-            }
-        }
-
-        // 3. Context-Aware Detected Events (e.g. "Call Geetha on Wednesday at 3 PM")
         val detectedEventItems = mutableListOf<DetectedEventItem>()
-        val seenEvents = HashSet<String>()
-        fun addEventIfValid(item: DetectedEventItem?) {
-            if (item == null) return
-            val key = "${item.title.lowercase()}_${item.startMillis}"
-            if (seenEvents.add(key)) {
-                detectedEventItems.add(item)
-            }
-        }
-
-        for (d in details) {
-            if (d.bounds != null) {
-                addEventIfValid(CalendarEventManager.parseEventCandidate(d.value, d.bounds))
-            }
-        }
-
-        if (textRegions.size >= 2) {
-            val sortedRegions = textRegions.sortedWith(compareBy<OcrTextItem> { it.bounds.top }.thenBy { it.bounds.left })
-            val lineClusters = mutableListOf<MutableList<OcrTextItem>>()
-            for (w in sortedRegions) {
-                val cy = w.bounds.exactCenterY()
-                val line = lineClusters.firstOrNull { cluster ->
-                    val avgY = cluster.map { it.bounds.exactCenterY() }.average()
-                    kotlin.math.abs(cy - avgY) <= (14f * density)
-                }
-                if (line != null) {
-                    line.add(w)
-                } else {
-                    lineClusters.add(mutableListOf(w))
-                }
-            }
-            for (line in lineClusters) {
-                line.sortBy { it.bounds.left }
-                val lineStr = line.joinToString(" ") { it.text.trim() }
-                val union = Rect(line.first().bounds)
-                for (elem in line.drop(1)) union.union(elem.bounds)
-                addEventIfValid(CalendarEventManager.parseEventCandidate(lineStr, union))
-            }
-        }
-
-        // 4. Detected Addresses
         val detectedAddressItems = mutableListOf<ScreenTargetItem>()
-        val seenAddresses = HashSet<String>()
-        fun addAddressIfValid(addrStr: String, bounds: Rect?) {
-            if (bounds == null) return
-            val clean = addrStr.trim()
-            if (clean.length >= 6 && seenAddresses.add(clean.lowercase())) {
-                detectedAddressItems.add(ScreenTargetItem(clean, bounds, "address"))
-            }
-        }
-        for (d in details) {
-            if (d.kind == "Address" && d.bounds != null) {
-                addAddressIfValid(d.value, d.bounds)
-            }
-        }
-        for (item in textRegions) {
-            ScreenContentAnalyzer.extractAddresses(item.text).forEach { addr ->
-                addAddressIfValid(addr, item.bounds)
-            }
-        }
+        val semanticResultItems = mutableListOf<SemanticResultItem>()
 
         // Active selection states
         var activeTextRect: RectF? = null
@@ -2044,7 +1832,7 @@ object ScreenAnalysisOverlay {
         }
 
         // 1. Fullscreen Interactive Screen Canvas
-        val interactiveCanvas = object : View(context) {
+        val interactiveCanvas = object : View(context), InteractiveContentCanvas {
             private val scanStartTime = System.currentTimeMillis()
             private val tempPaint = Paint(Paint.ANTI_ALIAS_FLAG)
             private val numberUnderlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -2129,14 +1917,29 @@ object ScreenAnalysisOverlay {
             private var offX = 0f
             private var offY = 0f
 
-            fun toViewRectF(r: Rect): RectF = RectF(
+            private var targetScale = 1f
+            private var targetOffX = 0f
+            private var targetOffY = 0f
+            private var targetDrawW = 0f
+            private var targetDrawH = 0f
+
+            private var zoomProgress = 0f
+            private var zoomAnimator: ValueAnimator? = null
+
+            private var isDismissingCanvas = false
+            private var dismissProgress = 0f
+            private var dismissTargetX = 0f
+            private var dismissTargetY = 0f
+            private var dismissAnimator: ValueAnimator? = null
+
+            override fun toViewRectF(r: Rect): RectF = RectF(
                 offX + r.left * scale,
                 offY + r.top * scale,
                 offX + r.right * scale,
                 offY + r.bottom * scale
             )
 
-            fun toViewRectF(r: RectF): RectF = RectF(
+            override fun toViewRectF(r: RectF): RectF = RectF(
                 offX + r.left * scale,
                 offY + r.top * scale,
                 offX + r.right * scale,
@@ -2148,18 +1951,96 @@ object ScreenAnalysisOverlay {
 
             fun updateCardBounds(w: Int, h: Int) {
                 if (screenshot == null || screenshot.isRecycled || w <= 0 || h <= 0) return
-                val topReserve = 82f * density
-                val bottomReserve = 146f * density
-                val sideReserve = 20f * density
+                val topReserve = 54f * density
+                val bottomReserve = 100f * density
+                val sideReserve = 12f * density
                 val availW = (w.toFloat() - sideReserve * 2f).coerceAtLeast(100f)
                 val availH = (h.toFloat() - topReserve - bottomReserve).coerceAtLeast(100f)
                 val fitScale = minOf(availW / screenshot.width, availH / screenshot.height)
-                scale = fitScale * 0.94f
-                val drawW = screenshot.width * scale
-                val drawH = screenshot.height * scale
-                offX = (w.toFloat() - drawW) / 2f
-                offY = topReserve + (availH - drawH) / 2f
-                destRect.set(offX, offY, offX + drawW, offY + drawH)
+                targetScale = fitScale * 0.985f
+                targetDrawW = screenshot.width * targetScale
+                targetDrawH = screenshot.height * targetScale
+                targetOffX = (w.toFloat() - targetDrawW) / 2f
+                targetOffY = topReserve + (availH - targetDrawH) / 2f
+                applyInterpolatedBounds()
+            }
+
+            fun applyInterpolatedBounds() {
+                val w = width.toFloat().coerceAtLeast(1f)
+                val h = height.toFloat().coerceAtLeast(1f)
+                if (screenshot == null || screenshot.isRecycled || targetDrawW <= 0f) return
+
+                if (isDismissingCanvas) {
+                    val dp = dismissProgress.coerceIn(0f, 1f)
+                    val outScale = 1f - dp * 0.88f
+                    val startCenterX = targetOffX + targetDrawW / 2f
+                    val startCenterY = targetOffY + targetDrawH / 2f
+                    val curCenterX = startCenterX + (dismissTargetX - startCenterX) * dp
+                    val curCenterY = startCenterY + (dismissTargetY - startCenterY) * dp
+                    val curDrawW = targetDrawW * outScale
+                    val curDrawH = targetDrawH * outScale
+                    offX = curCenterX - curDrawW / 2f
+                    offY = curCenterY - curDrawH / 2f
+                    scale = if (screenshot.width > 0) curDrawW / screenshot.width else 1f
+                    destRect.set(offX, offY, offX + curDrawW, offY + curDrawH)
+                } else {
+                    val p = zoomProgress.coerceIn(0f, 1f)
+                    val curDrawW = w + (targetDrawW - w) * p
+                    val curDrawH = h + (targetDrawH - h) * p
+                    offX = 0f + (targetOffX - 0f) * p
+                    offY = 0f + (targetOffY - 0f) * p
+                    scale = if (screenshot.width > 0) curDrawW / screenshot.width else 1f
+                    destRect.set(offX, offY, offX + curDrawW, offY + curDrawH)
+                }
+            }
+
+            override fun startZoomInAnimation() {
+                zoomAnimator?.cancel()
+                zoomProgress = 0f
+                applyInterpolatedBounds()
+                zoomAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 320L
+                    interpolator = android.view.animation.PathInterpolator(0.16f, 1f, 0.3f, 1f)
+                    addUpdateListener {
+                        zoomProgress = it.animatedValue as Float
+                        applyInterpolatedBounds()
+                        invalidate()
+                    }
+                    start()
+                }
+            }
+
+            override fun startZoomOutAnimation(targetButtonY: Float, fromRight: Boolean, onEnd: () -> Unit) {
+                zoomAnimator?.cancel()
+                dismissAnimator?.cancel()
+                isDismissingCanvas = true
+                dismissProgress = 0f
+                dismissTargetX = if (fromRight) width.toFloat() else 0f
+                dismissTargetY = targetButtonY
+
+                dismissAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 190L
+                    interpolator = android.view.animation.PathInterpolator(0.6f, -0.28f, 0.735f, 0.045f)
+                    addUpdateListener {
+                        dismissProgress = it.animatedValue as Float
+                        applyInterpolatedBounds()
+                        invalidate()
+                    }
+                    addListener(object : AnimatorListenerAdapter() {
+                        override fun onAnimationEnd(animation: Animator) {
+                            onEnd()
+                        }
+                    })
+                    start()
+                }
+            }
+
+            override fun updateData(details: List<ScreenDetail>, textRegions: List<OcrTextItem>) {
+                activeTextRegions.clear()
+                activeTextRegions.addAll(textRegions)
+                activeDetails.clear()
+                activeDetails.addAll(details)
+                postInvalidate()
             }
 
             override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -2423,25 +2304,33 @@ object ScreenAnalysisOverlay {
                 super.onDraw(canvas)
                 val now = System.currentTimeMillis()
 
-                // Solid AMOLED black background for workspace
-                canvas.drawColor(Color.BLACK)
+                val p = zoomProgress.coerceIn(0f, 1f)
+                val dp = if (isDismissingCanvas) dismissProgress.coerceIn(0f, 1f) else 0f
+                val dismissAlpha = (1f - dp).coerceIn(0f, 1f)
+
+                // Solid AMOLED black background fading in with zoomProgress
+                val bgAlpha = (255 * p * dismissAlpha).toInt().coerceIn(0, 255)
+                canvas.drawColor(Color.argb(bgAlpha, 0, 0, 0))
 
                 if (screenshot != null && !screenshot.isRecycled) {
                     if (destRect.isEmpty) {
                         updateCardBounds(width, height)
                     }
 
-                    val cardRadius = 18f * density
+                    val cardRadius = (18f * density) * p
                     val cardPath = Path().apply {
                         addRoundRect(destRect, cardRadius, cardRadius, Path.Direction.CW)
                     }
 
                     // Ambient drop shadow under screenshot card
-                    tempPaint.style = Paint.Style.FILL
-                    tempPaint.color = Color.argb(140, 0, 0, 0)
-                    tempPaint.maskFilter = BlurMaskFilter(14f * density, BlurMaskFilter.Blur.NORMAL)
-                    canvas.drawRoundRect(destRect, cardRadius, cardRadius, tempPaint)
-                    tempPaint.maskFilter = null
+                    if (p > 0.15f) {
+                        tempPaint.style = Paint.Style.FILL
+                        val shadowA = (140 * p * dismissAlpha).toInt().coerceIn(0, 140)
+                        tempPaint.color = Color.argb(shadowA, 0, 0, 0)
+                        tempPaint.maskFilter = BlurMaskFilter(14f * density, BlurMaskFilter.Blur.NORMAL)
+                        canvas.drawRoundRect(destRect, cardRadius, cardRadius, tempPaint)
+                        tempPaint.maskFilter = null
+                    }
 
                     // Draw base screenshot clipped inside the card
                     canvas.save()
@@ -2541,7 +2430,8 @@ object ScreenAnalysisOverlay {
                     tempPaint.shader = null
                     tempPaint.style = Paint.Style.STROKE
                     tempPaint.strokeWidth = 1.2f * density
-                    tempPaint.color = Color.argb(90, 255, 179, 0)
+                    val rimAlpha = if (p > 0.4f) (90 * (p - 0.4f) / 0.6f * dismissAlpha).toInt().coerceIn(0, 90) else 0
+                    tempPaint.color = Color.argb(rimAlpha, 255, 179, 0)
                     canvas.drawRoundRect(destRect, cardRadius, cardRadius, tempPaint)
 
                     // Perfect Geometric Square Snapping: cleanly animates the circled area as a square with 3% lift & ambient shadow
@@ -2770,7 +2660,7 @@ object ScreenAnalysisOverlay {
                         val bandRect = RectF(tr.left - padH, tr.top - padV, tr.right + padH, tr.bottom + padV)
                         canvas.drawRoundRect(bandRect, 5f * density, 5f * density, tempPaint)
                     } else {
-                        for (item in textRegions.take(30)) {
+                        for (item in activeTextRegions.take(30)) {
                             val bx = toViewRectF(item.bounds)
                             val isPhone = detectedPhoneItems.any { Rect.intersects(it.bounds, item.bounds) }
                             val isLink = detectedLinkItems.any { Rect.intersects(it.bounds, item.bounds) }
@@ -2813,14 +2703,21 @@ object ScreenAnalysisOverlay {
                         canvas.drawCircle(head.x, head.y, 2f * density, tailHeadPaint)
                         postInvalidateOnAnimation()
                     }
+
+
                 }
             }
 
+            private var isEdgeBackSwipe = false
+
             override fun onTouchEvent(event: MotionEvent): Boolean {
+                if (zoomProgress < 0.85f || isDismissingCanvas) return true
                 when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
                         downX = event.x
                         downY = event.y
+                        val edgeMargin = 36f * density
+                        isEdgeBackSwipe = (event.x < edgeMargin) || (event.x > width - edgeMargin)
 
                         // 1. Check if touching crop resize corners
                         if (selectedCropRect != null) {
@@ -2930,6 +2827,14 @@ object ScreenAnalysisOverlay {
                         gesturePath.lineTo(cx, cy)
                         gestureTrail.add(GestureTrailNode(cx, cy, System.currentTimeMillis()))
 
+                        val dx = cx - downX
+                        val dy = cy - downY
+                        if (isEdgeBackSwipe && kotlin.math.abs(dx) > 38f * density && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 1.35f) {
+                            isEdgeBackSwipe = false
+                            ScreenAnalysisOverlay.dismissWithAnimation()
+                            return true
+                        }
+
                         val dist = kotlin.math.hypot((cx - downX).toDouble(), (cy - downY).toDouble()).toFloat()
                         if (dist > 14f * density) {
                             isDraggingGesture = true
@@ -2982,7 +2887,7 @@ object ScreenAnalysisOverlay {
 
                         if (activeTextHandle != null && activeTextRect != null) {
                             activeTextHandle = null
-                            val selectedItems = textRegions.filter { item ->
+                            val selectedItems = activeTextRegions.filter { item ->
                                 val b = item.bounds
                                 val left = offX + b.left * scale
                                 val right = offX + b.right * scale
@@ -3101,7 +3006,7 @@ object ScreenAnalysisOverlay {
                                 selectedCropRect = null
                                 selectedTargetItem = null
                                 val swipeRect = RectF(minX, minY, maxX, maxY)
-                                val hitWords = textRegions.filter { item ->
+                                val hitWords = activeTextRegions.filter { item ->
                                     val b = item.bounds
                                     val left = offX + b.left * scale
                                     val right = offX + b.right * scale
@@ -3164,7 +3069,7 @@ object ScreenAnalysisOverlay {
                             }
 
                             // 3. Check Text words
-                            val clickedWord = textRegions.filter { item ->
+                            val clickedWord = activeTextRegions.filter { item ->
                                 val bx = toViewRectF(item.bounds)
                                 tx in (bx.left - 6f * density)..(bx.right + 6f * density) && ty in (bx.top - 6f * density)..(bx.bottom + 6f * density)
                             }.minByOrNull { it.bounds.width().toLong() * it.bounds.height().toLong() }
@@ -3383,274 +3288,9 @@ object ScreenAnalysisOverlay {
             addView(closeBtn)
         }
 
-        // 3. Horizontally Scrollable Bottom Mini Rectangle Cards for Numbers & Links
-        val semanticResultItems = mutableListOf<SemanticResultItem>()
-
-        // 1. Events
-        detectedEventItems.forEachIndexed { i, ev ->
-            semanticResultItems.add(
-                SemanticResultItem(
-                    id = "event_$i",
-                    category = "Events",
-                    iconEmoji = "📅",
-                    title = ev.title,
-                    subtitle = ev.dateSummary,
-                    bounds = ev.bounds,
-                    primaryActionName = "Create Event",
-                    onPrimaryAction = {
-                        val success = CalendarEventManager.createCalendarEvent(context, ev)
-                        if (success) {
-                            Toast.makeText(context, "✓ Event created: ${ev.title}", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Toast.makeText(context, "Opening calendar: ${ev.title}", Toast.LENGTH_SHORT).show()
-                        }
-                        NothingGlyphController.stopGetContentGlyph()
-                        dismissWithAnimation()
-                    },
-                    actions = listOf(
-                        ActionBubbleItem("Create Event") {
-                            CalendarEventManager.createCalendarEvent(context, ev)
-                            NothingGlyphController.stopGetContentGlyph()
-                            dismissWithAnimation()
-                        },
-                        ActionBubbleItem("Copy") {
-                            val clip = ClipData.newPlainText("Event", "${ev.title} on ${ev.dateSummary}")
-                            (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
-                            Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
-                            NothingGlyphController.stopGetContentGlyph()
-                            dismissWithAnimation()
-                        }
-                    )
-                )
-            )
-        }
-
-        // 2. Phone Numbers
-        detectedPhoneItems.forEachIndexed { i, phoneItem ->
-            val numStr = phoneItem.value.trim()
-            semanticResultItems.add(
-                SemanticResultItem(
-                    id = "phone_$i",
-                    category = "Numbers",
-                    iconEmoji = "📞",
-                    title = numStr,
-                    subtitle = null,
-                    bounds = phoneItem.bounds,
-                    primaryActionName = "Call",
-                    onPrimaryAction = {
-                        try {
-                            val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(numStr))).apply {
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            context.startActivity(intent)
-                        } catch (_: Exception) {}
-                        NothingGlyphController.stopGetContentGlyph()
-                        dismissWithAnimation()
-                    },
-                    actions = listOf(
-                        ActionBubbleItem("Call") {
-                            try {
-                                val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(numStr))).apply {
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                }
-                                context.startActivity(intent)
-                            } catch (_: Exception) {}
-                            NothingGlyphController.stopGetContentGlyph()
-                            dismissWithAnimation()
-                        },
-                        ActionBubbleItem("Message") {
-                            try {
-                                val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:" + Uri.encode(numStr))).apply {
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                }
-                                context.startActivity(intent)
-                            } catch (_: Exception) {}
-                            NothingGlyphController.stopGetContentGlyph()
-                            dismissWithAnimation()
-                        },
-                        ActionBubbleItem("Add to Contact") {
-                            try {
-                                val intent = Intent(Intent.ACTION_INSERT_OR_EDIT).apply {
-                                    type = ContactsContract.Contacts.CONTENT_ITEM_TYPE
-                                    putExtra(ContactsContract.Intents.Insert.PHONE, numStr)
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                }
-                                context.startActivity(intent)
-                            } catch (_: Exception) {
-                                try {
-                                    val fallback = Intent(Intent.ACTION_INSERT, ContactsContract.Contacts.CONTENT_URI).apply {
-                                        putExtra(ContactsContract.Intents.Insert.PHONE, numStr)
-                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    }
-                                    context.startActivity(fallback)
-                                } catch (_: Exception) {}
-                            }
-                            NothingGlyphController.stopGetContentGlyph()
-                            dismissWithAnimation()
-                        },
-                        ActionBubbleItem("Copy") {
-                            val clip = ClipData.newPlainText("Phone Number", numStr)
-                            (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
-                            Toast.makeText(context, "Number copied", Toast.LENGTH_SHORT).show()
-                            NothingGlyphController.stopGetContentGlyph()
-                            dismissWithAnimation()
-                        }
-                    )
-                )
-            )
-        }
-
-        // 3. Links & Emails
-        detectedLinkItems.forEachIndexed { i, linkItem ->
-            val linkStr = linkItem.value.trim()
-            val isEmail = linkItem.type == "email"
-            if (isEmail) {
-                semanticResultItems.add(
-                    SemanticResultItem(
-                        id = "email_$i",
-                        category = "Emails",
-                        iconEmoji = "✉️",
-                        title = linkStr,
-                        subtitle = null,
-                        bounds = linkItem.bounds,
-                        primaryActionName = "Send Email",
-                        onPrimaryAction = {
-                            try {
-                                val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + Uri.encode(linkStr))).apply {
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                }
-                                context.startActivity(intent)
-                            } catch (_: Exception) {}
-                            NothingGlyphController.stopGetContentGlyph()
-                            dismissWithAnimation()
-                        },
-                        actions = listOf(
-                            ActionBubbleItem("Send Email") {
-                                try {
-                                    val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + Uri.encode(linkStr))).apply {
-                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    }
-                                    context.startActivity(intent)
-                                } catch (_: Exception) {}
-                                NothingGlyphController.stopGetContentGlyph()
-                                dismissWithAnimation()
-                            },
-                            ActionBubbleItem("Copy") {
-                                val clip = ClipData.newPlainText("Email", linkStr)
-                                (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
-                                Toast.makeText(context, "Email copied", Toast.LENGTH_SHORT).show()
-                                NothingGlyphController.stopGetContentGlyph()
-                                dismissWithAnimation()
-                            },
-                            ActionBubbleItem("Share") {
-                                shareText(context, linkStr)
-                                NothingGlyphController.stopGetContentGlyph()
-                                dismissWithAnimation()
-                            }
-                        )
-                    )
-                )
-            } else {
-                semanticResultItems.add(
-                    SemanticResultItem(
-                        id = "link_$i",
-                        category = "Links",
-                        iconEmoji = "🔗",
-                        title = linkStr.removePrefix("https://").removePrefix("http://").take(32),
-                        subtitle = null,
-                        bounds = linkItem.bounds,
-                        primaryActionName = "Open",
-                        onPrimaryAction = {
-                            try {
-                                val uri = if (!linkStr.startsWith("http://") && !linkStr.startsWith("https://")) Uri.parse("https://$linkStr") else Uri.parse(linkStr)
-                                val intent = Intent(Intent.ACTION_VIEW, uri).apply {
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                }
-                                context.startActivity(intent)
-                            } catch (_: Exception) {}
-                            NothingGlyphController.stopGetContentGlyph()
-                            dismissWithAnimation()
-                        },
-                        actions = listOf(
-                            ActionBubbleItem("Open") {
-                                try {
-                                    val uri = if (!linkStr.startsWith("http://") && !linkStr.startsWith("https://")) Uri.parse("https://$linkStr") else Uri.parse(linkStr)
-                                    val intent = Intent(Intent.ACTION_VIEW, uri).apply {
-                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    }
-                                    context.startActivity(intent)
-                                } catch (_: Exception) {}
-                                NothingGlyphController.stopGetContentGlyph()
-                                dismissWithAnimation()
-                            },
-                            ActionBubbleItem("Copy") {
-                                val clip = ClipData.newPlainText("Link", linkStr)
-                                (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
-                                Toast.makeText(context, "Link copied", Toast.LENGTH_SHORT).show()
-                                NothingGlyphController.stopGetContentGlyph()
-                                dismissWithAnimation()
-                            },
-                            ActionBubbleItem("Share") {
-                                shareText(context, linkStr)
-                                NothingGlyphController.stopGetContentGlyph()
-                                dismissWithAnimation()
-                            }
-                        )
-                    )
-                )
-            }
-        }
-
-        // 4. Addresses
-        detectedAddressItems.forEachIndexed { i, addrItem ->
-            val addrStr = addrItem.value.trim()
-            semanticResultItems.add(
-                SemanticResultItem(
-                    id = "address_$i",
-                    category = "Addresses",
-                    iconEmoji = "📍",
-                    title = addrStr.take(32),
-                    subtitle = null,
-                    bounds = addrItem.bounds,
-                    primaryActionName = "Navigate",
-                    onPrimaryAction = {
-                        try {
-                            val mapUri = Uri.parse("geo:0,0?q=" + Uri.encode(addrStr))
-                            val intent = Intent(Intent.ACTION_VIEW, mapUri).apply {
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            context.startActivity(intent)
-                        } catch (_: Exception) {}
-                        NothingGlyphController.stopGetContentGlyph()
-                        dismissWithAnimation()
-                    },
-                    actions = listOf(
-                        ActionBubbleItem("Navigate") {
-                            try {
-                                val mapUri = Uri.parse("geo:0,0?q=" + Uri.encode(addrStr))
-                                val intent = Intent(Intent.ACTION_VIEW, mapUri).apply {
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                }
-                                context.startActivity(intent)
-                            } catch (_: Exception) {}
-                            NothingGlyphController.stopGetContentGlyph()
-                            dismissWithAnimation()
-                        },
-                        ActionBubbleItem("Copy") {
-                            val clip = ClipData.newPlainText("Address", addrStr)
-                            (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
-                            Toast.makeText(context, "Address copied", Toast.LENGTH_SHORT).show()
-                            NothingGlyphController.stopGetContentGlyph()
-                            dismissWithAnimation()
-                        },
-                        ActionBubbleItem("Share") {
-                            shareText(context, addrStr)
-                            NothingGlyphController.stopGetContentGlyph()
-                            dismissWithAnimation()
-                        }
-                    )
-                )
-            )
+        // Container for contextual floating inline badges (Events, Addresses)
+        val badgesContainer = FrameLayout(context).apply {
+            tag = "badges_container"
         }
 
         // Intelligent Adaptive Bottom Tray with Category Filtering (Modern M3 Expressive Style)
@@ -3663,13 +3303,8 @@ object ScreenAnalysisOverlay {
                 rightMargin = dp(14)
             }
             layoutParams = lp
+            visibility = View.GONE
         }
-
-        // Two-row bottom intelligence tray:
-        // Row 1: Phone Numbers
-        // Row 2: Links & Events
-        val phoneItems = semanticResultItems.filter { it.category == "Numbers" }
-        val linkAndEventItems = semanticResultItems.filter { it.category in listOf("Events", "Links", "Emails", "Address") }
 
         fun buildResultCard(item: SemanticResultItem, index: Int, staggerOffset: Long): View {
             val amberYellow = Color.parseColor("#FFB300")
@@ -3708,22 +3343,13 @@ object ScreenAnalysisOverlay {
                 addView(iconContainer)
 
                 // 2. Middle Content Stack (Meta category tag + bold value/title)
-                val catLabel = when (item.category) {
-                    "Events" -> "EVENT"
-                    "Numbers" -> "PHONE NUMBER"
-                    "Links" -> "LINK"
-                    "Emails" -> "EMAIL"
-                    "Address" -> "LOCATION"
-                    else -> "CLIPBOARD"
-                }
-
                 val textColumn = LinearLayout(context).apply {
                     orientation = LinearLayout.VERTICAL
                     gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(10), 0, dp(14), 0)
+                    setPadding(dp(12), 0, dp(14), 0)
 
                     val metaTv = TextView(context).apply {
-                        text = catLabel
+                        text = item.category.uppercase()
                         textSize = 9.5f
                         typeface = satoshiBold
                         setTextColor(amberYellow)
@@ -3794,195 +3420,723 @@ object ScreenAnalysisOverlay {
             }
         }
 
-        if (phoneItems.isNotEmpty() || linkAndEventItems.isNotEmpty()) {
-            // Row 1: Phone Numbers
-            if (phoneItems.isNotEmpty()) {
-                val phoneScroll = HorizontalScrollView(context).apply {
-                    isHorizontalScrollBarEnabled = false
-                    overScrollMode = View.OVER_SCROLL_NEVER
-                }
-                val phoneRow = LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                }
-                phoneItems.forEachIndexed { idx, item ->
-                    phoneRow.addView(buildResultCard(item, idx, 0L), LinearLayout.LayoutParams(-2, -2).apply {
-                        rightMargin = dp(10)
+        fun populateMiniCards() {
+            miniCardsContainer.removeAllViews()
+            val phoneItems = semanticResultItems.filter { it.category == "Numbers" }
+            val linkAndEventItems = semanticResultItems.filter { it.category in listOf("Events", "Links", "Emails", "Address") }
+
+            if (phoneItems.isNotEmpty() || linkAndEventItems.isNotEmpty()) {
+                miniCardsContainer.visibility = View.VISIBLE
+                // Row 1: Phone Numbers
+                if (phoneItems.isNotEmpty()) {
+                    val phoneScroll = HorizontalScrollView(context).apply {
+                        isHorizontalScrollBarEnabled = false
+                        overScrollMode = View.OVER_SCROLL_NEVER
+                    }
+                    val phoneRow = LinearLayout(context).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                    }
+                    phoneItems.forEachIndexed { idx, item ->
+                        phoneRow.addView(buildResultCard(item, idx, 0L), LinearLayout.LayoutParams(-2, -2).apply {
+                            rightMargin = dp(10)
+                        })
+                    }
+                    phoneScroll.addView(phoneRow)
+                    miniCardsContainer.addView(phoneScroll, LinearLayout.LayoutParams(-1, -2).apply {
+                        if (linkAndEventItems.isNotEmpty()) bottomMargin = dp(10)
                     })
                 }
-                phoneScroll.addView(phoneRow)
-                miniCardsContainer.addView(phoneScroll, LinearLayout.LayoutParams(-1, -2).apply {
-                    if (linkAndEventItems.isNotEmpty()) bottomMargin = dp(10)
-                })
+
+                // Row 2: Links and Events
+                if (linkAndEventItems.isNotEmpty()) {
+                    val linkEventScroll = HorizontalScrollView(context).apply {
+                        isHorizontalScrollBarEnabled = false
+                        overScrollMode = View.OVER_SCROLL_NEVER
+                    }
+                    val linkEventRow = LinearLayout(context).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                    }
+                    val staggerBase = if (phoneItems.isNotEmpty()) 80L else 0L
+                    linkAndEventItems.forEachIndexed { idx, item ->
+                        linkEventRow.addView(buildResultCard(item, idx, staggerBase), LinearLayout.LayoutParams(-2, -2).apply {
+                            rightMargin = dp(10)
+                        })
+                    }
+                    linkEventScroll.addView(linkEventRow)
+                    miniCardsContainer.addView(linkEventScroll, LinearLayout.LayoutParams(-1, -2))
+                }
+
+                miniCardsContainer.alpha = 0f
+                miniCardsContainer.translationY = 24f * density
+                miniCardsContainer.animate()
+                    .alpha(1f)
+                    .translationY(0f)
+                    .setDuration(260L)
+                    .setInterpolator(android.view.animation.OvershootInterpolator(1.2f))
+                    .start()
+            } else {
+                miniCardsContainer.visibility = View.GONE
+            }
+        }
+
+        fun populateBadges() {
+            badgesContainer.removeAllViews()
+            detectedEventItems.forEach { ev ->
+                val eventBadge = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.RECTANGLE
+                        cornerRadius = dp(14).toFloat()
+                        setColor(Color.argb(245, 20, 20, 24))
+                        setStroke(dp(1), Color.rgb(255, 179, 0))
+                    }
+                    setPadding(dp(9), dp(4), dp(10), dp(4))
+                    elevation = 0f
+                    outlineProvider = null
+                    isClickable = true
+                    isFocusable = true
+
+                    val icon = TextView(context).apply {
+                        text = "📅 "
+                        textSize = 10.5f
+                    }
+                    val label = TextView(context).apply {
+                        text = "Create Event"
+                        textSize = 11.5f
+                        typeface = satoshiBold
+                        setTextColor(Color.rgb(255, 179, 0))
+                    }
+                    addView(icon)
+                    addView(label)
+
+                    setOnClickListener {
+                        performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+                        val success = CalendarEventManager.createCalendarEvent(context, ev)
+                        if (success) {
+                            Toast.makeText(context, "✓ Event created: ${ev.title}", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "Opening calendar: ${ev.title}", Toast.LENGTH_SHORT).show()
+                        }
+                        NothingGlyphController.stopGetContentGlyph()
+                        dismissWithAnimation()
+                    }
+
+                    scaleX = 0f
+                    scaleY = 0f
+                    alpha = 0f
+                    animate()
+                        .scaleX(1f)
+                        .scaleY(1f)
+                        .alpha(1f)
+                        .setInterpolator(android.view.animation.OvershootInterpolator(1.4f))
+                        .setDuration(340L)
+                        .setStartDelay(200L)
+                        .start()
+                }
+
+                val badgeLp = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT)
+                val badgeWEstimate = dp(120)
+                val vBounds = interactiveCanvas.toViewRectF(ev.bounds)
+                if (vBounds.right + badgeWEstimate + dp(12) <= screenW) {
+                    badgeLp.leftMargin = (vBounds.right + dp(6)).toInt()
+                    badgeLp.topMargin = (vBounds.centerY() - dp(13)).toInt().coerceIn(dp(64), screenH - dp(120))
+                } else {
+                    badgeLp.leftMargin = vBounds.left.toInt().coerceIn(dp(12), screenW - badgeWEstimate - dp(12))
+                    badgeLp.topMargin = (vBounds.top - dp(32)).toInt().coerceIn(dp(64), screenH - dp(120))
+                }
+                badgesContainer.addView(eventBadge, badgeLp)
             }
 
-            // Row 2: Links and Events
-            if (linkAndEventItems.isNotEmpty()) {
-                val linkEventScroll = HorizontalScrollView(context).apply {
-                    isHorizontalScrollBarEnabled = false
-                    overScrollMode = View.OVER_SCROLL_NEVER
-                }
-                val linkEventRow = LinearLayout(context).apply {
+            detectedAddressItems.forEach { addrItem ->
+                val addrBadge = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.RECTANGLE
+                        cornerRadius = dp(14).toFloat()
+                        setColor(Color.argb(245, 20, 20, 24))
+                        setStroke(dp(1), Color.rgb(255, 179, 0))
+                    }
+                    setPadding(dp(9), dp(4), dp(10), dp(4))
+                    elevation = 0f
+                    outlineProvider = null
+                    isClickable = true
+                    isFocusable = true
+
+                    val icon = TextView(context).apply {
+                        text = "📍 "
+                        textSize = 10.5f
+                    }
+                    val label = TextView(context).apply {
+                        text = "Navigate"
+                        textSize = 11.5f
+                        typeface = satoshiBold
+                        setTextColor(Color.rgb(255, 179, 0))
+                    }
+                    addView(icon)
+                    addView(label)
+
+                    setOnClickListener {
+                        performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+                        try {
+                            val mapUri = Uri.parse("geo:0,0?q=" + Uri.encode(addrItem.value))
+                            val intent = Intent(Intent.ACTION_VIEW, mapUri).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            context.startActivity(intent)
+                        } catch (_: Exception) {}
+                        NothingGlyphController.stopGetContentGlyph()
+                        dismissWithAnimation()
+                    }
+
+                    scaleX = 0f
+                    scaleY = 0f
+                    alpha = 0f
+                    animate()
+                        .scaleX(1f)
+                        .scaleY(1f)
+                        .alpha(1f)
+                        .setInterpolator(android.view.animation.OvershootInterpolator(1.4f))
+                        .setDuration(340L)
+                        .setStartDelay(200L)
+                        .start()
                 }
-                val staggerBase = if (phoneItems.isNotEmpty()) 80L else 0L
-                linkAndEventItems.forEachIndexed { idx, item ->
-                    linkEventRow.addView(buildResultCard(item, idx, staggerBase), LinearLayout.LayoutParams(-2, -2).apply {
-                        rightMargin = dp(10)
-                    })
+
+                val badgeLp = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT)
+                val badgeWEstimate = dp(105)
+                val vBounds = interactiveCanvas.toViewRectF(addrItem.bounds)
+                if (vBounds.right + badgeWEstimate + dp(12) <= screenW) {
+                    badgeLp.leftMargin = (vBounds.right + dp(6)).toInt()
+                    badgeLp.topMargin = (vBounds.centerY() - dp(13)).toInt().coerceIn(dp(64), screenH - dp(120))
+                } else {
+                    badgeLp.leftMargin = vBounds.left.toInt().coerceIn(dp(12), screenW - badgeWEstimate - dp(12))
+                    badgeLp.topMargin = (vBounds.top - dp(32)).toInt().coerceIn(dp(64), screenH - dp(120))
                 }
-                linkEventScroll.addView(linkEventRow)
-                miniCardsContainer.addView(linkEventScroll, LinearLayout.LayoutParams(-1, -2))
+                badgesContainer.addView(addrBadge, badgeLp)
             }
-        } else {
-            miniCardsContainer.visibility = View.GONE
+        }
+
+        fun refreshRecognizedContent(newDetails: List<ScreenDetail>, newRegions: List<OcrTextItem>) {
+            detectedPhoneItems.clear()
+            detectedLinkItems.clear()
+            detectedEventItems.clear()
+            detectedAddressItems.clear()
+            semanticResultItems.clear()
+
+            activeDetails.clear()
+            activeDetails.addAll(newDetails)
+            activeTextRegions.clear()
+            activeTextRegions.addAll(newRegions)
+
+            // 1. Phone extraction
+            fun addPhoneIfValid(numStr: String, bounds: Rect?) {
+                if (bounds == null) return
+                val cleanDigits = numStr.filter(Char::isDigit)
+                if (cleanDigits.length in 7..15) {
+                    val key = if (cleanDigits.length >= 10) cleanDigits.takeLast(10) else cleanDigits
+                    val existing = detectedPhoneItems.firstOrNull {
+                        val d = it.value.filter(Char::isDigit)
+                        (if (d.length >= 10) d.takeLast(10) else d) == key
+                    }
+                    if (existing == null) {
+                        detectedPhoneItems.add(ScreenTargetItem(numStr.trim(), bounds, "phone"))
+                    } else {
+                        val exArea = existing.bounds.width().toLong() * existing.bounds.height().toLong()
+                        val newArea = bounds.width().toLong() * bounds.height().toLong()
+                        if (newArea in 1 until exArea) {
+                            val idx = detectedPhoneItems.indexOf(existing)
+                            detectedPhoneItems[idx] = ScreenTargetItem(if (numStr.startsWith("+")) numStr.trim() else existing.value, bounds, "phone")
+                        }
+                    }
+                }
+            }
+
+            for (item in activeTextRegions) {
+                val trimmed = item.text.trim()
+                ScreenContentAnalyzer.extractPhones(trimmed).forEach { phone ->
+                    addPhoneIfValid(phone, item.bounds)
+                }
+            }
+
+            if (activeTextRegions.size >= 2) {
+                val sortedRegions = activeTextRegions.sortedWith(compareBy<OcrTextItem> { it.bounds.top }.thenBy { it.bounds.left })
+                val lineClusters = mutableListOf<MutableList<OcrTextItem>>()
+                for (w in sortedRegions) {
+                    val cy = w.bounds.exactCenterY()
+                    val line = lineClusters.firstOrNull { cluster ->
+                        val avgY = cluster.map { it.bounds.exactCenterY() }.average()
+                        kotlin.math.abs(cy - avgY) <= (14f * density)
+                    }
+                    if (line != null) {
+                        line.add(w)
+                    } else {
+                        lineClusters.add(mutableListOf(w))
+                    }
+                }
+                for (line in lineClusters) {
+                    line.sortBy { it.bounds.left }
+                    val lineStr = line.joinToString(" ") { it.text.trim() }
+                    ScreenContentAnalyzer.extractPhones(lineStr).forEach { phone ->
+                        val phoneDigits = phone.filter(Char::isDigit)
+                        var bestMatch: List<OcrTextItem>? = null
+                        for (start in 0 until line.size) {
+                            var accum = ""
+                            for (end in start until line.size) {
+                                accum += line[end].text.filter(Char::isDigit)
+                                if (accum == phoneDigits) {
+                                    bestMatch = line.subList(start, end + 1)
+                                    break
+                                }
+                                if (accum.length > phoneDigits.length) break
+                            }
+                            if (bestMatch != null) break
+                        }
+                        val targetBounds = if (bestMatch != null && bestMatch.isNotEmpty()) {
+                            val union = Rect(bestMatch.first().bounds)
+                            for (elem in bestMatch.drop(1)) union.union(elem.bounds)
+                            union
+                        } else {
+                            val matching = line.filter { elem ->
+                                val digits = elem.text.filter(Char::isDigit)
+                                digits.isNotEmpty() && phoneDigits.contains(digits)
+                            }
+                            if (matching.isNotEmpty()) {
+                                val union = Rect(matching.first().bounds)
+                                for (elem in matching.drop(1)) union.union(elem.bounds)
+                                union
+                            } else null
+                        }
+                        targetBounds?.let { addPhoneIfValid(phone, it) }
+                    }
+                }
+            }
+
+            for (d in activeDetails) {
+                if (d.kind == "Phone number" && d.bounds != null) {
+                    addPhoneIfValid(d.value, d.bounds)
+                }
+            }
+
+            // 2. Link & Email extraction
+            fun addLinkIfValid(rawUrl: String, bounds: Rect?, isEmail: Boolean = false) {
+                if (bounds == null) return
+                val clean = ScreenContentAnalyzer.cleanUrl(rawUrl) ?: if (isEmail) rawUrl.trim() else null
+                if (clean != null) {
+                    val norm = clean.lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/')
+                    val existing = detectedLinkItems.firstOrNull {
+                        it.value.lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/') == norm
+                    }
+                    if (existing == null) {
+                        detectedLinkItems.add(ScreenTargetItem(clean, bounds, if (isEmail) "email" else "link"))
+                    } else {
+                        val exArea = existing.bounds.width().toLong() * existing.bounds.height().toLong()
+                        val newArea = bounds.width().toLong() * bounds.height().toLong()
+                        if (newArea in 1 until exArea) {
+                            val idx = detectedLinkItems.indexOf(existing)
+                            detectedLinkItems[idx] = ScreenTargetItem(clean, bounds, if (isEmail) "email" else "link")
+                        }
+                    }
+                }
+            }
+
+            for (item in activeTextRegions) {
+                val trimmed = item.text.trim()
+                ScreenContentAnalyzer.extractLinks(trimmed).forEach { url ->
+                    addLinkIfValid(url, item.bounds)
+                }
+                ScreenContentAnalyzer.extractEmails(trimmed).forEach { email ->
+                    addLinkIfValid(email, item.bounds, isEmail = true)
+                }
+            }
+
+            if (activeTextRegions.size >= 2) {
+                val sortedRegions = activeTextRegions.sortedWith(compareBy<OcrTextItem> { it.bounds.top }.thenBy { it.bounds.left })
+                val lineClusters = mutableListOf<MutableList<OcrTextItem>>()
+                for (w in sortedRegions) {
+                    val cy = w.bounds.exactCenterY()
+                    val line = lineClusters.firstOrNull { cluster ->
+                        val avgY = cluster.map { it.bounds.exactCenterY() }.average()
+                        kotlin.math.abs(cy - avgY) <= (14f * density)
+                    }
+                    if (line != null) {
+                        line.add(w)
+                    } else {
+                        lineClusters.add(mutableListOf(w))
+                    }
+                }
+                for (line in lineClusters) {
+                    line.sortBy { it.bounds.left }
+                    val lineStr = line.joinToString(" ") { it.text.trim() }
+                    ScreenContentAnalyzer.extractLinks(lineStr).forEach { url ->
+                        val cleanTarget = url.lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/')
+                        var bestMatch: List<OcrTextItem>? = null
+                        for (start in 0 until line.size) {
+                            var accum = ""
+                            for (end in start until line.size) {
+                                accum += line[end].text.trim()
+                                val accumNorm = accum.lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/')
+                                if (accumNorm.contains(cleanTarget) || cleanTarget.contains(accumNorm)) {
+                                    if (accumNorm.length >= cleanTarget.length * 0.8) {
+                                        bestMatch = line.subList(start, end + 1)
+                                        break
+                                    }
+                                }
+                            }
+                            if (bestMatch != null) break
+                        }
+                        val targetBounds = if (bestMatch != null && bestMatch.isNotEmpty()) {
+                            val union = Rect(bestMatch.first().bounds)
+                            for (elem in bestMatch.drop(1)) union.union(elem.bounds)
+                            union
+                        } else {
+                            val matching = line.filter { elem ->
+                                val t = elem.text.trim().lowercase().removePrefix("https://").removePrefix("http://")
+                                t.isNotEmpty() && cleanTarget.contains(t)
+                            }
+                            if (matching.isNotEmpty()) {
+                                val union = Rect(matching.first().bounds)
+                                for (elem in matching.drop(1)) union.union(elem.bounds)
+                                union
+                            } else null
+                        }
+                        targetBounds?.let { addLinkIfValid(url, it) }
+                    }
+                }
+            }
+
+            for (d in activeDetails) {
+                if (d.kind == "Link" && d.bounds != null) {
+                    addLinkIfValid(d.value, d.bounds)
+                }
+            }
+
+            // 3. Calendar Events
+            fun addEventIfValid(ev: DetectedEventItem?) {
+                if (ev != null && detectedEventItems.none { it.title.equals(ev.title, ignoreCase = true) && it.startMillis == ev.startMillis }) {
+                    detectedEventItems.add(ev)
+                }
+            }
+            for (d in activeDetails) {
+                if (d.kind == "Event" && d.bounds != null) {
+                    addEventIfValid(CalendarEventManager.parseEventCandidate(d.value, d.bounds))
+                }
+            }
+            if (activeTextRegions.size >= 2) {
+                val sortedRegions = activeTextRegions.sortedWith(compareBy<OcrTextItem> { it.bounds.top }.thenBy { it.bounds.left })
+                val lineClusters = mutableListOf<MutableList<OcrTextItem>>()
+                for (w in sortedRegions) {
+                    val cy = w.bounds.exactCenterY()
+                    val line = lineClusters.firstOrNull { cluster ->
+                        val avgY = cluster.map { it.bounds.exactCenterY() }.average()
+                        kotlin.math.abs(cy - avgY) <= (14f * density)
+                    }
+                    if (line != null) {
+                        line.add(w)
+                    } else {
+                        lineClusters.add(mutableListOf(w))
+                    }
+                }
+                for (line in lineClusters) {
+                    line.sortBy { it.bounds.left }
+                    val lineStr = line.joinToString(" ") { it.text.trim() }
+                    val union = Rect(line.first().bounds)
+                    for (elem in line.drop(1)) union.union(elem.bounds)
+                    addEventIfValid(CalendarEventManager.parseEventCandidate(lineStr, union))
+                }
+            }
+
+            // 4. Addresses
+            val seenAddresses = HashSet<String>()
+            fun addAddressIfValid(addrStr: String, bounds: Rect?) {
+                if (bounds == null) return
+                val clean = addrStr.trim()
+                if (clean.length >= 6 && seenAddresses.add(clean.lowercase())) {
+                    detectedAddressItems.add(ScreenTargetItem(clean, bounds, "address"))
+                }
+            }
+            for (d in activeDetails) {
+                if (d.kind == "Address" && d.bounds != null) {
+                    addAddressIfValid(d.value, d.bounds)
+                }
+            }
+            for (item in activeTextRegions) {
+                ScreenContentAnalyzer.extractAddresses(item.text).forEach { addr ->
+                    addAddressIfValid(addr, item.bounds)
+                }
+            }
+
+            // 5. Populate semanticResultItems
+            // Events
+            detectedEventItems.forEachIndexed { i, ev ->
+                semanticResultItems.add(
+                    SemanticResultItem(
+                        id = "event_$i",
+                        category = "Events",
+                        iconEmoji = "📅",
+                        title = ev.title,
+                        subtitle = ev.dateSummary,
+                        bounds = ev.bounds,
+                        primaryActionName = "Create Event",
+                        onPrimaryAction = {
+                            val success = CalendarEventManager.createCalendarEvent(context, ev)
+                            if (success) {
+                                Toast.makeText(context, "✓ Event created: ${ev.title}", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Opening calendar: ${ev.title}", Toast.LENGTH_SHORT).show()
+                            }
+                            NothingGlyphController.stopGetContentGlyph()
+                            dismissWithAnimation()
+                        },
+                        actions = listOf(
+                            ActionBubbleItem("Create Event") {
+                                CalendarEventManager.createCalendarEvent(context, ev)
+                                NothingGlyphController.stopGetContentGlyph()
+                                dismissWithAnimation()
+                            },
+                            ActionBubbleItem("Copy") {
+                                val clip = ClipData.newPlainText("Event", "${ev.title} on ${ev.dateSummary}")
+                                (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
+                                Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                                NothingGlyphController.stopGetContentGlyph()
+                                dismissWithAnimation()
+                            }
+                        )
+                    )
+                )
+            }
+
+            // Phone Numbers
+            detectedPhoneItems.forEachIndexed { i, phoneItem ->
+                val numStr = phoneItem.value.trim()
+                semanticResultItems.add(
+                    SemanticResultItem(
+                        id = "phone_$i",
+                        category = "Numbers",
+                        iconEmoji = "📞",
+                        title = numStr,
+                        subtitle = null,
+                        bounds = phoneItem.bounds,
+                        primaryActionName = "Call",
+                        onPrimaryAction = {
+                            try {
+                                val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(numStr))).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(intent)
+                            } catch (_: Exception) {}
+                            NothingGlyphController.stopGetContentGlyph()
+                            dismissWithAnimation()
+                        },
+                        actions = listOf(
+                            ActionBubbleItem("Call") {
+                                try {
+                                    val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(numStr))).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    context.startActivity(intent)
+                                } catch (_: Exception) {}
+                                NothingGlyphController.stopGetContentGlyph()
+                                dismissWithAnimation()
+                            },
+                            ActionBubbleItem("Message") {
+                                try {
+                                    val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:" + Uri.encode(numStr))).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    context.startActivity(intent)
+                                } catch (_: Exception) {}
+                                NothingGlyphController.stopGetContentGlyph()
+                                dismissWithAnimation()
+                            },
+                            ActionBubbleItem("Copy") {
+                                val clip = ClipData.newPlainText("Phone Number", numStr)
+                                (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
+                                Toast.makeText(context, "Number copied", Toast.LENGTH_SHORT).show()
+                                NothingGlyphController.stopGetContentGlyph()
+                                dismissWithAnimation()
+                            }
+                        )
+                    )
+                )
+            }
+
+            // Links & Emails
+            detectedLinkItems.forEachIndexed { i, linkItem ->
+                val linkStr = linkItem.value.trim()
+                val isEmail = linkItem.type == "email"
+                if (isEmail) {
+                    semanticResultItems.add(
+                        SemanticResultItem(
+                            id = "email_$i",
+                            category = "Emails",
+                            iconEmoji = "✉️",
+                            title = linkStr,
+                            subtitle = null,
+                            bounds = linkItem.bounds,
+                            primaryActionName = "Send Email",
+                            onPrimaryAction = {
+                                try {
+                                    val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + Uri.encode(linkStr))).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    context.startActivity(intent)
+                                } catch (_: Exception) {}
+                                NothingGlyphController.stopGetContentGlyph()
+                                dismissWithAnimation()
+                            },
+                            actions = listOf(
+                                ActionBubbleItem("Send Email") {
+                                    try {
+                                        val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + Uri.encode(linkStr))).apply {
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                        context.startActivity(intent)
+                                    } catch (_: Exception) {}
+                                    NothingGlyphController.stopGetContentGlyph()
+                                    dismissWithAnimation()
+                                },
+                                ActionBubbleItem("Copy") {
+                                    val clip = ClipData.newPlainText("Email", linkStr)
+                                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
+                                    Toast.makeText(context, "Email copied", Toast.LENGTH_SHORT).show()
+                                    NothingGlyphController.stopGetContentGlyph()
+                                    dismissWithAnimation()
+                                },
+                                ActionBubbleItem("Share") {
+                                    shareText(context, linkStr)
+                                    NothingGlyphController.stopGetContentGlyph()
+                                    dismissWithAnimation()
+                                }
+                            )
+                        )
+                    )
+                } else {
+                    semanticResultItems.add(
+                        SemanticResultItem(
+                            id = "link_$i",
+                            category = "Links",
+                            iconEmoji = "🔗",
+                            title = linkStr.removePrefix("https://").removePrefix("http://").take(32),
+                            subtitle = null,
+                            bounds = linkItem.bounds,
+                            primaryActionName = "Open",
+                            onPrimaryAction = {
+                                try {
+                                    val uri = if (!linkStr.startsWith("http://") && !linkStr.startsWith("https://")) Uri.parse("https://$linkStr") else Uri.parse(linkStr)
+                                    val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    context.startActivity(intent)
+                                } catch (_: Exception) {}
+                                NothingGlyphController.stopGetContentGlyph()
+                                dismissWithAnimation()
+                            },
+                            actions = listOf(
+                                ActionBubbleItem("Open") {
+                                    try {
+                                        val uri = if (!linkStr.startsWith("http://") && !linkStr.startsWith("https://")) Uri.parse("https://$linkStr") else Uri.parse(linkStr)
+                                        val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                        context.startActivity(intent)
+                                    } catch (_: Exception) {}
+                                    NothingGlyphController.stopGetContentGlyph()
+                                    dismissWithAnimation()
+                                },
+                                ActionBubbleItem("Copy") {
+                                    val clip = ClipData.newPlainText("Link", linkStr)
+                                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
+                                    Toast.makeText(context, "Link copied", Toast.LENGTH_SHORT).show()
+                                    NothingGlyphController.stopGetContentGlyph()
+                                    dismissWithAnimation()
+                                },
+                                ActionBubbleItem("Share") {
+                                    shareText(context, linkStr)
+                                    NothingGlyphController.stopGetContentGlyph()
+                                    dismissWithAnimation()
+                                }
+                            )
+                        )
+                    )
+                }
+            }
+
+            // Addresses
+            detectedAddressItems.forEachIndexed { i, addrItem ->
+                val addrStr = addrItem.value.trim()
+                semanticResultItems.add(
+                    SemanticResultItem(
+                        id = "address_$i",
+                        category = "Addresses",
+                        iconEmoji = "📍",
+                        title = addrStr.take(32),
+                        subtitle = null,
+                        bounds = addrItem.bounds,
+                        primaryActionName = "Navigate",
+                        onPrimaryAction = {
+                            try {
+                                val mapUri = Uri.parse("geo:0,0?q=" + Uri.encode(addrStr))
+                                val intent = Intent(Intent.ACTION_VIEW, mapUri).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(intent)
+                            } catch (_: Exception) {}
+                            NothingGlyphController.stopGetContentGlyph()
+                            dismissWithAnimation()
+                        },
+                        actions = listOf(
+                            ActionBubbleItem("Navigate") {
+                                try {
+                                    val mapUri = Uri.parse("geo:0,0?q=" + Uri.encode(addrStr))
+                                    val intent = Intent(Intent.ACTION_VIEW, mapUri).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    context.startActivity(intent)
+                                } catch (_: Exception) {}
+                                NothingGlyphController.stopGetContentGlyph()
+                                dismissWithAnimation()
+                            },
+                            ActionBubbleItem("Copy") {
+                                val clip = ClipData.newPlainText("Address", addrStr)
+                                (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
+                                Toast.makeText(context, "Address copied", Toast.LENGTH_SHORT).show()
+                                NothingGlyphController.stopGetContentGlyph()
+                                dismissWithAnimation()
+                            },
+                            ActionBubbleItem("Share") {
+                                shareText(context, addrStr)
+                                NothingGlyphController.stopGetContentGlyph()
+                                dismissWithAnimation()
+                            }
+                        )
+                    )
+                )
+            }
+
+            // Update interactive canvas & bottom cards & badges
+            (interactiveCanvas as? InteractiveContentCanvas)?.updateData(activeDetails, activeTextRegions)
+            populateMiniCards()
+            populateBadges()
         }
 
         rootLayout.addView(interactiveCanvas, FrameLayout.LayoutParams(-1, -1))
-
-        // Inline contextual badges for high-intent Events
-        detectedEventItems.forEach { ev ->
-            val eventBadge = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.RECTANGLE
-                    cornerRadius = dp(14).toFloat()
-                    setColor(Color.argb(245, 20, 20, 24))
-                    setStroke(dp(1), Color.rgb(255, 179, 0))
-                }
-                setPadding(dp(9), dp(4), dp(10), dp(4))
-                elevation = 0f
-                outlineProvider = null
-                isClickable = true
-                isFocusable = true
-
-                val icon = TextView(context).apply {
-                    text = "📅 "
-                    textSize = 10.5f
-                }
-                val label = TextView(context).apply {
-                    text = "Create Event"
-                    textSize = 11.5f
-                    typeface = satoshiBold
-                    setTextColor(Color.rgb(255, 179, 0))
-                }
-                addView(icon)
-                addView(label)
-
-                setOnClickListener {
-                    performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
-                    val success = CalendarEventManager.createCalendarEvent(context, ev)
-                    if (success) {
-                        Toast.makeText(context, "✓ Event created: ${ev.title}", Toast.LENGTH_SHORT).show()
-                    } else {
-                        Toast.makeText(context, "Opening calendar: ${ev.title}", Toast.LENGTH_SHORT).show()
-                    }
-                    NothingGlyphController.stopGetContentGlyph()
-                    dismissWithAnimation()
-                }
-
-                scaleX = 0f
-                scaleY = 0f
-                alpha = 0f
-                animate()
-                    .scaleX(1f)
-                    .scaleY(1f)
-                    .alpha(1f)
-                    .setInterpolator(android.view.animation.OvershootInterpolator(1.4f))
-                    .setDuration(340L)
-                    .setStartDelay(200L)
-                    .start()
-            }
-
-            val badgeLp = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT)
-            val badgeWEstimate = dp(120)
-            val vBounds = interactiveCanvas.toViewRectF(ev.bounds)
-            if (vBounds.right + badgeWEstimate + dp(12) <= screenW) {
-                badgeLp.leftMargin = (vBounds.right + dp(6)).toInt()
-                badgeLp.topMargin = (vBounds.centerY() - dp(13)).toInt().coerceIn(dp(64), screenH - dp(120))
-            } else {
-                badgeLp.leftMargin = vBounds.left.toInt().coerceIn(dp(12), screenW - badgeWEstimate - dp(12))
-                badgeLp.topMargin = (vBounds.top - dp(32)).toInt().coerceIn(dp(64), screenH - dp(120))
-            }
-            rootLayout.addView(eventBadge, badgeLp)
-        }
-
-        // Inline contextual badges for high-intent Addresses
-        detectedAddressItems.forEach { addrItem ->
-            val addrBadge = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.RECTANGLE
-                    cornerRadius = dp(14).toFloat()
-                    setColor(Color.argb(245, 20, 20, 24))
-                    setStroke(dp(1), Color.rgb(255, 179, 0))
-                }
-                setPadding(dp(9), dp(4), dp(10), dp(4))
-                elevation = 0f
-                outlineProvider = null
-                isClickable = true
-                isFocusable = true
-
-                val icon = TextView(context).apply {
-                    text = "📍 "
-                    textSize = 10.5f
-                }
-                val label = TextView(context).apply {
-                    text = "Navigate"
-                    textSize = 11.5f
-                    typeface = satoshiBold
-                    setTextColor(Color.rgb(255, 179, 0))
-                }
-                addView(icon)
-                addView(label)
-
-                setOnClickListener {
-                    performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
-                    try {
-                        val mapUri = Uri.parse("geo:0,0?q=" + Uri.encode(addrItem.value))
-                        val intent = Intent(Intent.ACTION_VIEW, mapUri).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        }
-                        context.startActivity(intent)
-                    } catch (_: Exception) {}
-                    NothingGlyphController.stopGetContentGlyph()
-                    dismissWithAnimation()
-                }
-
-                scaleX = 0f
-                scaleY = 0f
-                alpha = 0f
-                animate()
-                    .scaleX(1f)
-                    .scaleY(1f)
-                    .alpha(1f)
-                    .setInterpolator(android.view.animation.OvershootInterpolator(1.4f))
-                    .setDuration(340L)
-                    .setStartDelay(200L)
-                    .start()
-            }
-
-            val badgeLp = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT)
-            val badgeWEstimate = dp(105)
-            val vBounds = interactiveCanvas.toViewRectF(addrItem.bounds)
-            if (vBounds.right + badgeWEstimate + dp(12) <= screenW) {
-                badgeLp.leftMargin = (vBounds.right + dp(6)).toInt()
-                badgeLp.topMargin = (vBounds.centerY() - dp(13)).toInt().coerceIn(dp(64), screenH - dp(120))
-            } else {
-                badgeLp.leftMargin = vBounds.left.toInt().coerceIn(dp(12), screenW - badgeWEstimate - dp(12))
-                badgeLp.topMargin = (vBounds.top - dp(32)).toInt().coerceIn(dp(64), screenH - dp(120))
-            }
-            rootLayout.addView(addrBadge, badgeLp)
-        }
-
+        rootLayout.addView(badgesContainer, FrameLayout.LayoutParams(-1, -1))
         rootLayout.addView(actionBubbleLayout, FrameLayout.LayoutParams(-2, -2))
         rootLayout.addView(topBar)
         rootLayout.addView(miniCardsContainer)
 
         rootLayout.setupViews(interactiveCanvas, actionBubbleLayout, topBar, miniCardsContainer)
+
+        rootLayout.onDataUpdated = { newD, newR ->
+            refreshRecognizedContent(newD, newR)
+        }
+
+        if (details.isNotEmpty() || textRegions.isNotEmpty()) {
+            refreshRecognizedContent(details, textRegions)
+        }
 
         return rootLayout
     }
@@ -5406,6 +5560,23 @@ class GetContentRootLayout(context: Context) : FrameLayout(context) {
     private var actionBubbleLayoutView: View? = null
     private var topBarView: View? = null
     private var miniCardsView: View? = null
+
+    var onDataUpdated: ((List<ScreenDetail>, List<OcrTextItem>) -> Unit)? = null
+
+    fun populateRecognizedContent(details: List<ScreenDetail>, textRegions: List<OcrTextItem>) {
+        onDataUpdated?.invoke(details, textRegions)
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event.action == KeyEvent.ACTION_UP) {
+                ScreenAnalysisOverlay.dismissWithAnimation()
+            }
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     init {
         setWillNotDraw(false)
         setBackgroundColor(Color.TRANSPARENT)
@@ -5439,6 +5610,8 @@ class GetContentRootLayout(context: Context) : FrameLayout(context) {
         this.isFromRight = fromRight
         this.isMorphing = true
 
+        (interactiveCanvasView as? InteractiveContentCanvas)?.startZoomInAnimation()
+
         val pushOffset = if (isFromRight) -14f * density else 14f * density
 
         val animator = ValueAnimator.ofFloat(0f, 1f).apply {
@@ -5448,12 +5621,6 @@ class GetContentRootLayout(context: Context) : FrameLayout(context) {
             addUpdateListener {
                 val p = it.animatedValue as Float
                 morphProgress = p
-                // 1:1 crisp screen layout — no scale down per user request
-                interactiveCanvasView?.let { ic ->
-                    ic.scaleX = 1f
-                    ic.scaleY = 1f
-                    ic.translationX = 0f
-                }
                 invalidate()
             }
             addListener(object : AnimatorListenerAdapter() {
@@ -5489,14 +5656,14 @@ class GetContentRootLayout(context: Context) : FrameLayout(context) {
                 .setInterpolator(android.view.animation.OvershootInterpolator(1.35f))
                 .start()
         }
-
-
     }
 
     fun startSpringMorphOut(buttonCenterY: Float, fromRight: Boolean, onEnd: () -> Unit) {
         this.buttonY = buttonCenterY
         this.isFromRight = fromRight
         this.isMorphing = true
+
+        (interactiveCanvasView as? InteractiveContentCanvas)?.startZoomOutAnimation(buttonCenterY, fromRight) {}
 
         val w = width.toFloat().coerceAtLeast(1f)
         val targetX = if (fromRight) w else 0f
@@ -5527,13 +5694,6 @@ class GetContentRootLayout(context: Context) : FrameLayout(context) {
                     view.scaleX = p
                     view.scaleY = p
                     view.alpha = (p * 1.25f).coerceIn(0f, 1f)
-                }
-
-                // 1:1 crisp screen layout — no scale down per user request
-                interactiveCanvasView?.let { ic ->
-                    ic.scaleX = 1f
-                    ic.scaleY = 1f
-                    ic.translationX = 0f
                 }
 
                 invalidate()

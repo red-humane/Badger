@@ -481,81 +481,78 @@ class EssentialKeyService : AccessibilityService() {
                         return
                     }
                     mainHandler.post {
-                        val token = ScreenAnalysisOverlay.beginScan(this@EssentialKeyService, isDouble = isDouble)
-                        val nodeDetails = ScreenContentAnalyzer.scanAccessibilityNodes(rootInActiveWindow, resources.displayMetrics.density)
-                        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-                        recognizer.process(InputImage.fromBitmap(bitmap, 0))
-                            .addOnSuccessListener(screenshotWorker) { result ->
-                                val topGuard = (56f * resources.displayMetrics.density).toInt()
-                                val bottomGuard = heightPixels() - (36f * resources.displayMetrics.density).toInt()
-                                // 1. Extract classified items (Links and Phone numbers) from lines & blocks
-                                val extractedDetails = mutableListOf<ScreenDetail>()
-                                for (block in result.textBlocks) {
-                                    for (line in block.lines) {
-                                        val lineText = line.text.trim()
-                                        val lineRect = line.boundingBox ?: block.boundingBox ?: android.graphics.Rect()
-                                        val lineClassified = ScreenContentAnalyzer.classifyRecognizedText(lineText)
-                                        for (item in lineClassified) {
-                                            val matchingElements = line.elements.filter { elem ->
-                                                elem.text.isNotEmpty() && item.value.contains(elem.text, ignoreCase = true)
-                                            }
-                                            val targetBounds = if (matchingElements.isNotEmpty()) {
-                                                val union = android.graphics.Rect(matchingElements.first().boundingBox ?: lineRect)
-                                                for (elem in matchingElements.drop(1)) {
-                                                    elem.boundingBox?.let { union.union(it) }
+                        val token = ScreenAnalysisOverlay.showInstantContent(this@EssentialKeyService, bitmap)
+                        val rootNode = rootInActiveWindow
+                        screenshotWorker.execute {
+                            val nodeDetails = ScreenContentAnalyzer.scanAccessibilityNodes(rootNode, resources.displayMetrics.density)
+                            val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                            recognizer.process(InputImage.fromBitmap(bitmap, 0))
+                                .addOnSuccessListener(screenshotWorker) { result ->
+                                    val topGuard = (56f * resources.displayMetrics.density).toInt()
+                                    val bottomGuard = heightPixels() - (36f * resources.displayMetrics.density).toInt()
+                                    // 1. Extract classified items (Links and Phone numbers) from lines & blocks
+                                    val extractedDetails = mutableListOf<ScreenDetail>()
+                                    for (block in result.textBlocks) {
+                                        for (line in block.lines) {
+                                            val lineText = line.text.trim()
+                                            val lineRect = line.boundingBox ?: block.boundingBox ?: android.graphics.Rect()
+                                            val lineClassified = ScreenContentAnalyzer.classifyRecognizedText(lineText)
+                                            for (item in lineClassified) {
+                                                val matchingElements = line.elements.filter { elem ->
+                                                    elem.text.isNotEmpty() && item.value.contains(elem.text, ignoreCase = true)
                                                 }
-                                                union
-                                            } else {
-                                                android.graphics.Rect(lineRect)
+                                                val targetBounds = if (matchingElements.isNotEmpty()) {
+                                                    val union = android.graphics.Rect(matchingElements.first().boundingBox ?: lineRect)
+                                                    for (elem in matchingElements.drop(1)) {
+                                                        elem.boundingBox?.let { union.union(it) }
+                                                    }
+                                                    union
+                                                } else {
+                                                    android.graphics.Rect(lineRect)
+                                                }
+                                                extractedDetails.add(item.copy(bounds = targetBounds))
                                             }
-                                            extractedDetails.add(item.copy(bounds = targetBounds))
                                         }
                                     }
-                                }
-                                val finalDetails = ScreenContentAnalyzer.rankAndDeduplicate(extractedDetails + nodeDetails)
+                                    val finalDetails = ScreenContentAnalyzer.rankAndDeduplicate(extractedDetails + nodeDetails)
 
-                                // 2. Extract granular word-level items for precision word selection and manual resize
-                                val regions = result.textBlocks.flatMap { block ->
-                                    block.lines.flatMap { line ->
-                                        line.elements.mapNotNull { element ->
-                                            val rect = element.boundingBox
-                                            val text = element.text.trim()
-                                            if (rect != null && text.isNotEmpty() && rect.width() > 3 && rect.height() > 3 &&
-                                                ScreenContentAnalyzer.isAcceptableOcrBlock(text, rect, topGuard, bottomGuard)) {
-                                                OcrTextItem(text, android.graphics.Rect(rect), element.confidence)
-                                            } else null
+                                    // 2. Extract granular word-level items for precision word selection and manual resize
+                                    val regions = result.textBlocks.flatMap { block ->
+                                        block.lines.flatMap { line ->
+                                            line.elements.mapNotNull { element ->
+                                                val rect = element.boundingBox
+                                                val text = element.text.trim()
+                                                if (rect != null && text.isNotEmpty() && rect.width() > 3 && rect.height() > 3 &&
+                                                    ScreenContentAnalyzer.isAcceptableOcrBlock(text, rect, topGuard, bottomGuard)) {
+                                                    OcrTextItem(text, android.graphics.Rect(rect), element.confidence)
+                                                } else null
+                                            }
                                         }
+                                    }.sortedWith(compareBy<OcrTextItem> { it.bounds.top }.thenBy { it.bounds.left })
+                                        .distinctBy { it.text.lowercase() to it.bounds.toShortString() }
+                                    mainHandler.post {
+                                        contentScanInFlight = false
+                                        ScreenAnalysisOverlay.updateContentDetails(
+                                            token,
+                                            this@EssentialKeyService,
+                                            finalDetails,
+                                            regions
+                                        )
                                     }
-                                }.sortedWith(compareBy<OcrTextItem> { it.bounds.top }.thenBy { it.bounds.left })
-                                    .distinctBy { it.text.lowercase() to it.bounds.toShortString() }
-                                mainHandler.post {
-                                    contentScanInFlight = false
-                                    ScreenAnalysisOverlay.completeScan(
-                                        token,
-                                        this@EssentialKeyService,
-                                        finalDetails,
-                                        bitmap,
-                                        regions,
-                                        "Get Content",
-                                        if (finalDetails.isEmpty()) "No clear content found" else "${finalDetails.size} items detected"
-                                    )
                                 }
-                            }
-                            .addOnFailureListener(screenshotWorker) {
-                                mainHandler.post {
-                                    contentScanInFlight = false
-                                    ScreenAnalysisOverlay.completeScan(
-                                        token,
-                                        this@EssentialKeyService,
-                                        emptyList(),
-                                        bitmap,
-                                        emptyList(),
-                                        "Get Content",
-                                        "No clear content found"
-                                    )
+                                .addOnFailureListener(screenshotWorker) {
+                                    mainHandler.post {
+                                        contentScanInFlight = false
+                                        ScreenAnalysisOverlay.updateContentDetails(
+                                            token,
+                                            this@EssentialKeyService,
+                                            emptyList(),
+                                            emptyList()
+                                        )
+                                    }
                                 }
-                            }
-                            .addOnCompleteListener(screenshotWorker) { recognizer.close() }
+                                .addOnCompleteListener(screenshotWorker) { recognizer.close() }
+                        }
                     }
                 }
                 override fun onFailure(errorCode: Int) {
