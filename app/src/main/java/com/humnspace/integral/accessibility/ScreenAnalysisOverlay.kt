@@ -3217,9 +3217,7 @@ object ScreenAnalysisOverlay {
                 // Ambient glow eliminated per user request (strict obsidian black & yellow theme)
 
         // 2. Badger Theme Top Header (Clean obsidian glass with Badger Yellow accent)
-        val topBar = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        val topBar = FrameLayout(context).apply {
             val topInset = dp(38)
             layoutParams = FrameLayout.LayoutParams(-1, -2).apply {
                 gravity = Gravity.TOP
@@ -3231,43 +3229,39 @@ object ScreenAnalysisOverlay {
             val amberYellow = Color.parseColor("#FFB300")
             val darkBase = Color.parseColor("#121214")
 
-            // Left: Solid matte obsidian black base (#121214) with 1px amber-yellow (#FFB300) outline
+            // Centered: Solid matte obsidian black base (#121214) with 1px amber-yellow (#FFB300) outline
             val titlePill = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
+                gravity = Gravity.CENTER
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
-                    cornerRadius = dp(14).toFloat()
+                    cornerRadius = dp(16).toFloat()
                     setColor(darkBase)
-                    setStroke(dp(1), amberYellow)
+                    setStroke(dp(1), Color.argb(180, 255, 179, 0))
                 }
-                setPadding(dp(14), dp(7), dp(14), dp(7))
+                setPadding(dp(18), dp(7), dp(18), dp(7))
                 elevation = 0f
                 outlineProvider = null
 
                 val titleText = TextView(context).apply {
-                    text = "Get-Content"
-                    textSize = 13f
+                    text = "Get Content"
+                    textSize = 13.5f
                     setTextColor(amberYellow)
                     typeface = satoshiBold
-                    letterSpacing = 0.03f
+                    letterSpacing = 0.04f
                 }
                 addView(titleText)
             }
-            addView(titlePill, LinearLayout.LayoutParams(-2, -2).apply { weight = 0f })
-
-            // Spacer
-            val spacer = View(context)
-            addView(spacer, LinearLayout.LayoutParams(0, dp(1)).apply { weight = 1f })
+            addView(titlePill, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
 
             // Right: Matching close button
             val closeBtn = FrameLayout(context).apply {
-                val s = dp(34)
-                layoutParams = LinearLayout.LayoutParams(s, s)
+                val s = dp(36)
+                layoutParams = FrameLayout.LayoutParams(s, s, Gravity.END or Gravity.CENTER_VERTICAL)
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
                     setColor(darkBase)
-                    setStroke(dp(1), amberYellow)
+                    setStroke(dp(1), Color.argb(180, 255, 179, 0))
                 }
                 elevation = 0f
                 outlineProvider = null
@@ -3560,12 +3554,12 @@ object ScreenAnalysisOverlay {
             )
         }
 
-        // Intelligent Adaptive Bottom Tray with Category Filtering
+        // Intelligent Adaptive Bottom Tray with Category Filtering (Modern M3 Expressive Style)
         val miniCardsContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             val lp = FrameLayout.LayoutParams(-1, -2).apply {
                 gravity = Gravity.BOTTOM
-                bottomMargin = dp(24)
+                bottomMargin = dp(28)
                 leftMargin = dp(14)
                 rightMargin = dp(14)
             }
@@ -3579,58 +3573,91 @@ object ScreenAnalysisOverlay {
         val linkAndEventItems = semanticResultItems.filter { it.category in listOf("Events", "Links", "Emails", "Address") }
 
         fun buildResultCard(item: SemanticResultItem, index: Int, staggerOffset: Long): View {
+            val amberYellow = Color.parseColor("#FFB300")
             return LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
-                    cornerRadius = dp(12).toFloat()
-                    setColor(Color.parseColor("#141418"))
-                    setStroke(dp(1), Color.argb(130, 80, 80, 90))
+                    cornerRadius = dp(28).toFloat() // Modern M3 Expressive tactile capsule
+                    setColor(Color.parseColor("#16161A")) // Rich obsidian matte base
+                    setStroke(dp(1), Color.argb(130, 255, 179, 0)) // Glowing Badger yellow accent rim
                 }
-                setPadding(dp(12), dp(6), dp(10), dp(6))
+                setPadding(dp(10), dp(8), dp(10), dp(8))
                 elevation = 0f
                 outlineProvider = null
                 isClickable = true
                 isFocusable = true
 
-                val catLabel = when (item.category) {
-                    "Events" -> "EVENT"
-                    "Numbers" -> "CALL"
-                    "Links" -> "LINK"
-                    "Address" -> "NAV"
-                    else -> "CLIP"
-                }
-                val tagTv = TextView(context).apply {
-                    text = catLabel
-                    textSize = 9.5f
-                    typeface = satoshiBold
-                    setTextColor(Color.parseColor("#FFB300"))
+                // 1. Leading M3E Expressive Squircle Avatar
+                val avatarSize = dp(40)
+                val iconContainer = FrameLayout(context).apply {
+                    layoutParams = LinearLayout.LayoutParams(avatarSize, avatarSize)
                     background = GradientDrawable().apply {
                         shape = GradientDrawable.RECTANGLE
-                        cornerRadius = dp(4).toFloat()
-                        setColor(Color.argb(38, 255, 179, 0))
+                        cornerRadius = dp(14).toFloat()
+                        setColor(Color.argb(45, 255, 179, 0))
+                        setStroke(dp(1), Color.argb(90, 255, 179, 0))
                     }
-                    setPadding(dp(6), dp(2), dp(6), dp(2))
+                    val iconTv = TextView(context).apply {
+                        text = item.iconEmoji
+                        textSize = 17f
+                        gravity = Gravity.CENTER
+                    }
+                    addView(iconTv, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
                 }
-                val titleTv = TextView(context).apply {
-                    text = item.title
-                    textSize = 12f
-                    typeface = satoshiBold
-                    setTextColor(Color.WHITE)
+                addView(iconContainer)
+
+                // 2. Middle Content Stack (Meta category tag + bold value/title)
+                val catLabel = when (item.category) {
+                    "Events" -> "EVENT"
+                    "Numbers" -> "PHONE NUMBER"
+                    "Links" -> "LINK"
+                    "Emails" -> "EMAIL"
+                    "Address" -> "LOCATION"
+                    else -> "CLIPBOARD"
                 }
+
+                val textColumn = LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(10), 0, dp(14), 0)
+
+                    val metaTv = TextView(context).apply {
+                        text = catLabel
+                        textSize = 9.5f
+                        typeface = satoshiBold
+                        setTextColor(amberYellow)
+                        letterSpacing = 0.08f
+                    }
+                    val titleTv = TextView(context).apply {
+                        text = item.title
+                        textSize = 13.5f
+                        typeface = satoshiBold
+                        setTextColor(Color.WHITE)
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                    }
+                    addView(metaTv)
+                    addView(titleTv)
+                }
+                addView(textColumn, LinearLayout.LayoutParams(0, -2).apply {
+                    weight = 1f
+                })
+
+                // 3. Trailing M3E Action Button (Prominent tactile capsule in Badger yellow)
                 val actionBtn = TextView(context).apply {
                     text = item.primaryActionName
-                    textSize = 11f
+                    textSize = 12.5f
                     typeface = satoshiBold
                     setTextColor(Color.parseColor("#121214"))
                     gravity = Gravity.CENTER
                     background = GradientDrawable().apply {
                         shape = GradientDrawable.RECTANGLE
-                        cornerRadius = dp(8).toFloat()
-                        setColor(Color.parseColor("#FFB300"))
+                        cornerRadius = dp(18).toFloat()
+                        setColor(amberYellow)
                     }
-                    setPadding(dp(10), dp(4), dp(10), dp(4))
+                    setPadding(dp(16), dp(8), dp(16), dp(8))
                     isClickable = true
                     isFocusable = true
                     setOnClickListener {
@@ -3639,36 +3666,21 @@ object ScreenAnalysisOverlay {
                         item.onPrimaryAction()
                     }
                 }
-
-                addView(tagTv)
-                val spaceTag = View(context)
-                addView(spaceTag, LinearLayout.LayoutParams(dp(7), dp(1)))
-                addView(titleTv)
-                val space = View(context)
-                addView(space, LinearLayout.LayoutParams(dp(10), dp(1)))
                 addView(actionBtn)
 
                 // Staggered entrance animation:
-                // Card container rises 12dp, opacity 0 -> 100%
-                val delay = (staggerOffset + index * 40L).coerceAtMost(360L)
+                val delay = (staggerOffset + index * 45L).coerceAtMost(360L)
                 alpha = 0f
-                translationY = 12f * density
+                translationY = 16f * density
                 animate()
                     .alpha(1f)
                     .translationY(0f)
-                    .setDuration(240L)
+                    .setDuration(260L)
                     .setStartDelay(delay)
-                    .setInterpolator(android.view.animation.DecelerateInterpolator(1.2f))
+                    .setInterpolator(android.view.animation.OvershootInterpolator(1.15f))
                     .start()
 
-                tagTv.alpha = 0f
-                tagTv.animate().alpha(1f).setDuration(120L).setStartDelay(delay).start()
-                titleTv.alpha = 0f
-                titleTv.animate().alpha(1f).setDuration(160L).setStartDelay(delay + 40L).start()
-                actionBtn.alpha = 0f
-                actionBtn.animate().alpha(1f).setDuration(180L).setStartDelay(delay + 80L).start()
-
-                // Tapping card identifies source position on screen and glides action menu
+                // Tapping card body identifies source position on screen and glides action menu
                 setOnClickListener {
                     performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
                     IntegralAcoustics.playItemSelect(context)
@@ -3697,12 +3709,12 @@ object ScreenAnalysisOverlay {
                 }
                 phoneItems.forEachIndexed { idx, item ->
                     phoneRow.addView(buildResultCard(item, idx, 0L), LinearLayout.LayoutParams(-2, -2).apply {
-                        rightMargin = dp(8)
+                        rightMargin = dp(10)
                     })
                 }
                 phoneScroll.addView(phoneRow)
                 miniCardsContainer.addView(phoneScroll, LinearLayout.LayoutParams(-1, -2).apply {
-                    if (linkAndEventItems.isNotEmpty()) bottomMargin = dp(8)
+                    if (linkAndEventItems.isNotEmpty()) bottomMargin = dp(10)
                 })
             }
 
@@ -3719,7 +3731,7 @@ object ScreenAnalysisOverlay {
                 val staggerBase = if (phoneItems.isNotEmpty()) 80L else 0L
                 linkAndEventItems.forEachIndexed { idx, item ->
                     linkEventRow.addView(buildResultCard(item, idx, staggerBase), LinearLayout.LayoutParams(-2, -2).apply {
-                        rightMargin = dp(8)
+                        rightMargin = dp(10)
                     })
                 }
                 linkEventScroll.addView(linkEventRow)
