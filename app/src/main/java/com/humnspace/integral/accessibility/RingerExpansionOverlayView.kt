@@ -47,7 +47,7 @@ class RingerExpansionOverlayView(
     // Physical dimensions (Circle for Ring, Squircle for Vibrate)
     private val capsuleW = 62f * density
     private val capsuleH = 62f * density
-    private val capsuleCorner = 18f * density
+    private val capsuleCorner = 16f * density
     private val marginFromBezel = 14f * density
 
     private var state = State.IDLE
@@ -458,11 +458,52 @@ class RingerExpansionOverlayView(
         if (vibWeight > 0.01f) {
             val vA = (alphaInt * vibWeight).toInt().coerceIn(0, 255)
             iconFillPaint.color = Color.argb(vA, 0, 0, 0)
-            canvas.save()
-            canvas.scale(scaleF, scaleF)
-            canvas.translate(-12f, -12f)
-            canvas.drawPath(mobileVibratePath, iconFillPaint)
-            canvas.restore()
+
+            // Exact replica of the reference image: Solid black phone body + 4 rounded vibration pills
+            val cw = capsuleW
+            val ch = capsuleH
+            val phoneW = cw * 0.354f
+            val phoneH = ch * 0.635f
+            val phoneR = phoneW * 0.31f
+
+            // 1. Center solid black phone capsule
+            canvas.drawRoundRect(
+                -phoneW / 2f,
+                -phoneH / 2f,
+                phoneW / 2f,
+                phoneH / 2f,
+                phoneR,
+                phoneR,
+                iconFillPaint
+            )
+
+            // 2. Vibration pills
+            val barW = cw * 0.055f
+            val barGap = cw * 0.031f
+            val innerH = ch * 0.286f
+            val innerR = barW / 2f
+            val outerH = ch * 0.168f
+            val outerR = barW / 2f
+
+            // Left inner bar
+            val liRight = -phoneW / 2f - barGap
+            val liLeft = liRight - barW
+            canvas.drawRoundRect(liLeft, -innerH / 2f, liRight, innerH / 2f, innerR, innerR, iconFillPaint)
+
+            // Right inner bar
+            val riLeft = phoneW / 2f + barGap
+            val riRight = riLeft + barW
+            canvas.drawRoundRect(riLeft, -innerH / 2f, riRight, innerH / 2f, innerR, innerR, iconFillPaint)
+
+            // Left outer bar
+            val loRight = liLeft - barGap
+            val loLeft = loRight - barW
+            canvas.drawRoundRect(loLeft, -outerH / 2f, loRight, outerH / 2f, outerR, outerR, iconFillPaint)
+
+            // Right outer bar
+            val roLeft = riRight + barGap
+            val roRight = roLeft + barW
+            canvas.drawRoundRect(roLeft, -outerH / 2f, roRight, outerH / 2f, outerR, outerR, iconFillPaint)
         }
 
         if (isSilent) {

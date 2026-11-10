@@ -4667,20 +4667,32 @@ object ScreenAnalysisOverlay {
             paint.color = Color.argb(alpha, 255, 196, 0)
             paint.strokeCap = Paint.Cap.ROUND
             if (vibrating) {
-                // Material Symbols Outlined mobile_vibrate, fitted to a 48dp glyph box.
                 canvas.save()
-                canvas.translate(x - 24f * density, y - 24f * density)
-                canvas.scale(2f * density, 2f * density)
+                canvas.translate(x, y)
                 paint.style = Paint.Style.FILL
-                canvas.drawRoundRect(RectF(0f, 9f, 2f, 15f), 0.6f, 0.6f, paint)
-                canvas.drawRoundRect(RectF(3f, 5f, 5f, 20f), 0.6f, 0.6f, paint)
-                canvas.drawRoundRect(RectF(22f, 9f, 24f, 15f), 0.6f, 0.6f, paint)
-                canvas.drawRoundRect(RectF(19f, 5f, 21f, 20f), 0.6f, 0.6f, paint)
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 1.35f
-                canvas.drawRoundRect(RectF(6f, 3f, 18f, 21f), 1.8f, 1.8f, paint)
-                paint.style = Paint.Style.FILL
-                canvas.drawCircle(12f, 7f, 0.75f, paint)
+                val s = 28f * density
+                val phoneW = s * 0.354f
+                val phoneH = s * 0.635f
+                val phoneR = phoneW * 0.31f
+                canvas.drawRoundRect(-phoneW / 2f, -phoneH / 2f, phoneW / 2f, phoneH / 2f, phoneR, phoneR, paint)
+                val barW = s * 0.055f
+                val barGap = s * 0.031f
+                val innerH = s * 0.286f
+                val innerR = barW / 2f
+                val outerH = s * 0.168f
+                val outerR = barW / 2f
+                val liRight = -phoneW / 2f - barGap
+                val liLeft = liRight - barW
+                canvas.drawRoundRect(liLeft, -innerH / 2f, liRight, innerH / 2f, innerR, innerR, paint)
+                val riLeft = phoneW / 2f + barGap
+                val riRight = riLeft + barW
+                canvas.drawRoundRect(riLeft, -innerH / 2f, riRight, innerH / 2f, innerR, innerR, paint)
+                val loRight = liLeft - barGap
+                val loLeft = loRight - barW
+                canvas.drawRoundRect(loLeft, -outerH / 2f, loRight, outerH / 2f, outerR, outerR, paint)
+                val roLeft = riRight + barGap
+                val roRight = roLeft + barW
+                canvas.drawRoundRect(roLeft, -outerH / 2f, roRight, outerH / 2f, outerR, outerR, paint)
                 canvas.restore()
             } else {
                 // Material Symbols Outlined volume_up, aimed inward from the selected edge.
