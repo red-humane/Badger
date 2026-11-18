@@ -47,6 +47,7 @@ object ScreenContentAnalyzer {
     private val pricePattern = Regex("(?i)(?:[₹$€£¥₩]\\s?\\d[\\d,]*(?:\\.\\d{1,2})?|\\b(?:INR|USD|EUR|GBP|CAD|AUD)\\s?\\d[\\d,]*(?:\\.\\d{1,2})?)")
     private val dateTimePattern = Regex("\\b(?:\\d{1,2}[/-]\\d{1,2}[/-](?:\\d{2}|\\d{4})|\\d{4}-\\d{2}-\\d{2}|\\d{1,2}:\\d{2}(?:\\s?[APap][Mm])|\\d{1,2}\\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\s+\\d{2,4})\\b")
     private val measurementPattern = Regex("(?i)\\b\\d+(?:[.,]\\d+)?\\s?(?:kg|g|mg|lb|lbs|cm|mm|km|m|ft|in|ml|l|°c|°f|%)\\b")
+    private val trackingPattern = Regex("(?i)\\b(?:tracking(?:\\s*(?:id|no|number))?|track\\s*#?|awb|shipment\\s*(?:id|number)|order\\s*(?:tracking\\s*)?(?:id|number))\\s*[:#-]?\\s*([A-Z0-9][A-Z0-9-]{7,29})\\b")
 
     // Status bar & UI artifacts filtering
     private val statusBarClock = Regex("(?i)^(\\d{1,2}:\\d{2}(:\\d{2})?(\\s?[APap][Mm])?)$")
@@ -211,7 +212,7 @@ object ScreenContentAnalyzer {
     }
 
     fun classifyRecognizedText(rawText: String): List<ScreenDetail> {
-        val clean = rawText.trim().replace("\r", "").lines().joinToString("\n") { it.trim().replace(Regex("[\\t ]+"), " ") }
+        val clean = normalizeCapturedText(rawText)
         if (clean.isBlank()) return emptyList()
 
         val results = mutableListOf<ScreenDetail>()
@@ -263,6 +264,14 @@ object ScreenContentAnalyzer {
             extractedEntities.add(measurement.lowercase())
         }
 
+        trackingPattern.findAll(clean).forEach { match ->
+            val id = match.groupValues[1].trim()
+            if (id.length >= 8) {
+                results += ScreenDetail("Tracking number", id)
+                extractedEntities.add(id.lowercase())
+            }
+        }
+
         // 8. Meaningful Screen Text
         val lettersCount = clean.count(Char::isLetter)
         val cleanLower = clean.lowercase()
@@ -275,6 +284,31 @@ object ScreenContentAnalyzer {
         }
 
         return results
+    }
+
+    /** Join OCR line wraps, remove exact repeated labels, and retain paragraph breaks. */
+    fun normalizeCapturedText(rawText: String): String {
+        val lines = rawText.replace("\r", "").lines().map { it.trim().replace(Regex("[\\t ]+"), " ") }
+        val output = mutableListOf<String>()
+        var paragraph = mutableListOf<String>()
+        fun flush() {
+            if (paragraph.isEmpty()) return
+            val joined = paragraph.fold(mutableListOf<String>()) { acc, line ->
+                if (acc.isNotEmpty() && acc.last().endsWith("-") && line.firstOrNull()?.isLowerCase() == true) {
+                    acc[acc.lastIndex] = acc.last().dropLast(1) + line
+                } else acc += line
+                acc
+            }.joinToString(" ").replace(Regex("\\s+([,.;:!?])"), "$1")
+            output += joined
+            paragraph = mutableListOf()
+        }
+        for (line in lines) {
+            if (line.isBlank()) flush()
+            else if (line == paragraph.lastOrNull()) continue
+            else paragraph += line
+        }
+        flush()
+        return output.joinToString("\n\n").trim()
     }
 
     fun rankAndDeduplicate(details: List<ScreenDetail>): List<ScreenDetail> {

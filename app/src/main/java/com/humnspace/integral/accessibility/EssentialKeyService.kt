@@ -120,6 +120,23 @@ class EssentialKeyService : AccessibilityService() {
     )
     private var launcherPackagesQueried = false
     private var previousPackageName: String? = null
+    fun currentTargetPackage(): String? = previousPackageName
+    @Volatile private var paymentAppForeground = false
+    private val paymentPackages = setOf(
+        "com.google.android.apps.walletnfcrel",
+        "com.google.android.apps.wallet", // legacy Google Pay
+        "com.google.android.gms", // Google Pay flows hosted by Play services
+        "com.samsung.android.spay",
+        "com.samsung.android.spaylite",
+        "com.paypal.android.p2pmobile",
+        "com.venmo",
+        "com.squareup.cash",
+        "com.zellepay.zelle",
+        "com.phonepe.app",
+        "net.one97.paytm",
+        "com.google.android.apps.nbu.paisa.user",
+        "com.amazon.mShop.android.shopping"
+    )
     private val progressWatchdogHandler = Handler(Looper.getMainLooper())
     private val progressWatchdogRunnable = Runnable {
         NothingGlyphController.clearDownloadProgress()
@@ -138,7 +155,33 @@ class EssentialKeyService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null || !cachedUseGlyphs) return
+        if (event == null) return
+
+        // Payment apps must never have Badger UI over them or trigger an action from the key.
+        // Clear any window as soon as Android reports a protected app becoming foreground.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val newPkg = event.packageName?.toString() ?: return
+            val protectedNow = isPaymentPackage(newPkg)
+            if (protectedNow) {
+                paymentAppForeground = true
+                previousPackageName = newPkg
+                resetPressState()
+                ScreenAnalysisOverlay.dismiss()
+                NothingGlyphController.turnOffAll()
+                return
+            }
+            // Payment UI may briefly hand focus to System UI (for biometrics or a chooser).
+            // Keep the guard active until an ordinary app/launcher is reported.
+            if (paymentAppForeground && newPkg == "com.android.systemui") {
+                ScreenAnalysisOverlay.dismiss()
+                return
+            }
+            if (paymentAppForeground) {
+                paymentAppForeground = false
+                previousPackageName = newPkg
+            }
+        }
+        if (paymentAppForeground || !cachedUseGlyphs) return
 
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
@@ -195,6 +238,11 @@ class EssentialKeyService : AccessibilityService() {
         }
     }
     override fun onKeyEvent(event: KeyEvent): Boolean {
+        if (isPaymentContext()) {
+            if (selectedKeyDown || pendingRingerPreview != null) resetPressState()
+            ScreenAnalysisOverlay.dismiss()
+            return false
+        }
         if (event.keyCode == KeyEvent.KEYCODE_BACK) {
             if (ScreenAnalysisOverlay.isAnyOverlayShowing()) {
                 if (event.action == KeyEvent.ACTION_UP) {
@@ -236,6 +284,7 @@ class EssentialKeyService : AccessibilityService() {
     }
 
     private fun onSelectedKeyDown() {
+        if (isPaymentContext()) return
         if (selectedKeyDown) return
         selectedKeyDown = true
         longPressFired = false
@@ -338,6 +387,10 @@ class EssentialKeyService : AccessibilityService() {
     }
 
     private fun runMappedGesture(gesture: String) {
+        if (isPaymentContext()) {
+            resetPressState()
+            return
+        }
         val preview = pendingRingerPreview
         pendingRingerPreview = null
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
@@ -381,6 +434,10 @@ class EssentialKeyService : AccessibilityService() {
     }
 
     private fun executeMapping(action: String, preview: String? = null, isDouble: Boolean = false) {
+        if (isPaymentContext()) {
+            resetPressState()
+            return
+        }
         when (action) {
             ACTION_RINGER -> {
                 val audio = getSystemService(AUDIO_SERVICE) as AudioManager
@@ -428,6 +485,7 @@ class EssentialKeyService : AccessibilityService() {
     }
 
     private fun scanQrLens() {
+        if (isPaymentContext()) return
         if (Build.VERSION.SDK_INT >= 30) {
             try {
                 takeScreenshot(
@@ -462,6 +520,7 @@ class EssentialKeyService : AccessibilityService() {
     fun rescanContent() = scanScreenContent(false)
 
     private fun scanScreenContent(isDouble: Boolean = false) {
+        if (isPaymentContext()) return
         if (contentScanInFlight) return
         contentScanInFlight = true
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
@@ -486,7 +545,8 @@ class EssentialKeyService : AccessibilityService() {
                         screenshotWorker.execute {
                             val nodeDetails = ScreenContentAnalyzer.scanAccessibilityNodes(rootNode, resources.displayMetrics.density)
                             val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-                            recognizer.process(InputImage.fromBitmap(bitmap, 0))
+                            val ocrBitmap = OcrImagePreprocessor.prepare(bitmap, upscaleSmallText = false)
+                            recognizer.process(InputImage.fromBitmap(ocrBitmap, 0))
                                 .addOnSuccessListener(screenshotWorker) { result ->
                                     val topGuard = (56f * resources.displayMetrics.density).toInt()
                                     val bottomGuard = heightPixels() - (36f * resources.displayMetrics.density).toInt()
@@ -514,7 +574,16 @@ class EssentialKeyService : AccessibilityService() {
                                             }
                                         }
                                     }
+                                    extractedDetails.addAll(
+                                        ScreenContentAnalyzer.classifyRecognizedText(result.text)
+                                            .filter { it.kind != "Screen text" }
+                                    )
                                     val finalDetails = ScreenContentAnalyzer.rankAndDeduplicate(extractedDetails + nodeDetails)
+
+                                    val normalizedCapture = ScreenContentAnalyzer.normalizeCapturedText(result.text)
+                                    val detailsWithCapture = if (normalizedCapture.isNotBlank()) {
+                                        finalDetails + ScreenDetail("Screen text", normalizedCapture)
+                                    } else finalDetails
 
                                     // 2. Extract granular word-level items for precision word selection and manual resize
                                     val regions = result.textBlocks.flatMap { block ->
@@ -535,7 +604,7 @@ class EssentialKeyService : AccessibilityService() {
                                         ScreenAnalysisOverlay.updateContentDetails(
                                             token,
                                             this@EssentialKeyService,
-                                            finalDetails,
+                                            detailsWithCapture,
                                             regions
                                         )
                                     }
@@ -551,7 +620,10 @@ class EssentialKeyService : AccessibilityService() {
                                         )
                                     }
                                 }
-                                .addOnCompleteListener(screenshotWorker) { recognizer.close() }
+                                .addOnCompleteListener(screenshotWorker) {
+                                    recognizer.close()
+                                    if (!ocrBitmap.isRecycled) ocrBitmap.recycle()
+                                }
                         }
                     }
                 }
@@ -569,6 +641,20 @@ class EssentialKeyService : AccessibilityService() {
     }
 
     private fun heightPixels(): Int = resources.displayMetrics.heightPixels
+
+    private fun isPaymentPackage(pkg: String): Boolean =
+        pkg in paymentPackages || pkg.contains("wallet", ignoreCase = true) ||
+            pkg.contains("payment", ignoreCase = true) || pkg.contains("banking", ignoreCase = true)
+
+    private fun isPaymentContext(): Boolean {
+        if (paymentAppForeground) return true
+        val activePackage = try { rootInActiveWindow?.packageName?.toString() } catch (_: Exception) { null }
+        if (activePackage != null && isPaymentPackage(activePackage)) {
+            paymentAppForeground = true
+            return true
+        }
+        return false
+    }
 
     private fun showMessage(title: String, message: String) = android.widget.Toast.makeText(this, "$title · $message", android.widget.Toast.LENGTH_LONG).show()
 

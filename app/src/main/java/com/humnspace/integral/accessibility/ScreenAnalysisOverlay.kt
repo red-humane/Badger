@@ -49,6 +49,7 @@ import android.graphics.Typeface
 import android.content.ClipboardManager
 import androidx.core.graphics.PathParser
 import com.humnspace.integral.R
+import java.util.Locale
 
 /** A temporary, touchable results sheet with a touch-through perimeter animation. */
 // Gesture ripple and comet tail nodes for ScreenAnalysis
@@ -62,6 +63,7 @@ interface InteractiveContentCanvas {
 }
 
 object ScreenAnalysisOverlay {
+    private val cropOcrExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private var windowManager: WindowManager? = null
     private var glowView: View? = null
     private var panelView: View? = null
@@ -212,7 +214,7 @@ object ScreenAnalysisOverlay {
         activeScreenshot = screenshot
         pendingScreenshot = null
         NothingGlyphController.startGetContentGlyph()
-        val panel = makePanel(service, emptyList(), screenshot, emptyList(), onRescan = { (service as? EssentialKeyService)?.rescanContent() })
+        val panel = makePanel(service, emptyList(), screenshot, emptyList(), onRescan = { (service as? EssentialKeyService)?.rescanContent() }, sourcePackage = (service as? EssentialKeyService)?.currentTargetPackage())
         panelView = panel
         resultsPanel = panel
         revealPanel(manager, service, panel)
@@ -238,7 +240,7 @@ object ScreenAnalysisOverlay {
         activeService = service
         activeScreenshot = screenshot
         pendingScreenshot = null
-        val panel = makePanel(service, details, screenshot, textRegions, onRescan = { (service as? EssentialKeyService)?.rescanContent() })
+        val panel = makePanel(service, details, screenshot, textRegions, onRescan = { (service as? EssentialKeyService)?.rescanContent() }, sourcePackage = (service as? EssentialKeyService)?.currentTargetPackage())
         panelView = panel
         resultsPanel = panel
         NothingGlyphController.onContentExtracted()
@@ -1451,6 +1453,138 @@ object ScreenAnalysisOverlay {
         }
     }
 
+    private fun showTextQuestionDialog(context: Context, capturedText: String) {
+        val input = EditText(context).apply {
+            hint = "Ask a question about the captured text"
+            setSingleLine(false)
+            minLines = 2
+            maxLines = 4
+        }
+        android.app.AlertDialog.Builder(context)
+            .setTitle("Ask about this text")
+            .setMessage("Badger searches only this capture and keeps the answer on your phone.")
+            .setView(input)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Find answer") { _, _ ->
+                val question = input.text.toString().trim()
+                val sentences = capturedText.split(Regex("(?<=[.!?])\\s+|\\n+"))
+                    .map(String::trim).filter { it.isNotBlank() }
+                val answer = if (question.contains(Regex("(?i)\\b(summary|summarize|main point|about)\\b"))) {
+                    sentences.take(3).joinToString(" ")
+                } else {
+                    val ignored = setOf("what", "when", "where", "which", "with", "from", "this", "that", "does", "about", "have", "been", "were", "will", "would", "could", "should", "tell", "show", "find")
+                    val terms = Regex("[\\p{L}\\p{N}]{3,}").findAll(question.lowercase(Locale.ROOT))
+                        .map { it.value }.filterNot { it in ignored }.toSet()
+                    val matches = sentences.map { sentence ->
+                        sentence to terms.count { term -> sentence.contains(term, ignoreCase = true) }
+                    }.filter { it.second > 0 }.sortedByDescending { it.second }.take(3)
+                    if (matches.isEmpty()) "I couldn't find an answer in this captured text." else matches.joinToString("\n\n") { it.first }
+                }.ifBlank { "I couldn't find readable text in this capture." }
+                android.app.AlertDialog.Builder(context)
+                    .setTitle("From this capture")
+                    .setMessage(answer)
+                    .setPositiveButton("Done", null)
+                    .show()
+            }
+            .show()
+    }
+
+    private fun showSavedSnippetsDialog(context: Context) {
+        val snippets = SavedSnippetsManager.all(context)
+        if (snippets.isEmpty()) {
+            android.app.AlertDialog.Builder(context).setTitle("Saved snippets")
+                .setMessage("Snippets you save from Get Content will appear here.")
+                .setPositiveButton("Done", null).show()
+            return
+        }
+        val list = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(18, 4, 18, 4)
+        }
+        val scroll = ScrollView(context).apply { addView(list) }
+        snippets.forEach { snippet ->
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(8, 12, 8, 12)
+            }
+            row.addView(TextView(context).apply {
+                text = snippet.text.take(500)
+                textSize = 15f
+                setTextColor(Color.WHITE)
+            })
+            val footer = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            footer.addView(TextView(context).apply {
+                text = "${snippet.source} · ${SavedSnippetsManager.formatDate(snippet.savedAt)}"
+                textSize = 11f
+                setTextColor(Color.LTGRAY)
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            })
+            footer.addView(TextView(context).apply {
+                text = "DELETE"
+                textSize = 11f
+                setTextColor(Color.rgb(255, 179, 0))
+                setPadding(12, 8, 8, 8)
+                setOnClickListener {
+                    SavedSnippetsManager.delete(context, snippet.id)
+                    Toast.makeText(context, "Snippet deleted", Toast.LENGTH_SHORT).show()
+                    showSavedSnippetsDialog(context)
+                }
+            })
+            row.addView(footer)
+            list.addView(row)
+            list.addView(View(context).apply { setBackgroundColor(Color.DKGRAY) }, LinearLayout.LayoutParams(-1, 1))
+        }
+        android.app.AlertDialog.Builder(context).setTitle("Saved snippets")
+            .setView(scroll).setPositiveButton("Done", null).show()
+    }
+
+    private fun reviewAndScheduleReminder(context: Context, titleSuggestion: String, initialTime: Long) {
+        val title = EditText(context).apply {
+            setText(titleSuggestion.take(80))
+            setSelection(text.length)
+            hint = "What should Badger remind you about?"
+        }
+        android.app.AlertDialog.Builder(context)
+            .setTitle("Review reminder")
+            .setMessage("Choose and confirm when Badger should remind you.")
+            .setView(title)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Choose time") { _, _ ->
+                val cal = java.util.Calendar.getInstance().apply {
+                    timeInMillis = initialTime.coerceAtLeast(System.currentTimeMillis() + 60_000L)
+                }
+                android.app.DatePickerDialog(context, { _, year, month, day ->
+                    cal.set(java.util.Calendar.YEAR, year)
+                    cal.set(java.util.Calendar.MONTH, month)
+                    cal.set(java.util.Calendar.DAY_OF_MONTH, day)
+                    android.app.TimePickerDialog(context, { _, hour, minute ->
+                        cal.set(java.util.Calendar.HOUR_OF_DAY, hour)
+                        cal.set(java.util.Calendar.MINUTE, minute)
+                        cal.set(java.util.Calendar.SECOND, 0)
+                        cal.set(java.util.Calendar.MILLISECOND, 0)
+                        if (cal.timeInMillis <= System.currentTimeMillis()) {
+                            Toast.makeText(context, "Choose a future time", Toast.LENGTH_SHORT).show()
+                        } else {
+                            val finalTitle = title.text.toString().trim().ifBlank { "Reminder" }
+                            val reminder = BadgerReminder(
+                                title = finalTitle,
+                                triggerTimestamp = cal.timeInMillis,
+                                scheduledAtIso = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.getDefault()).format(cal.time),
+                                timezone = java.util.TimeZone.getDefault().id
+                            )
+                            ReminderManager.saveReminder(context, reminder)
+                            ReminderManager.scheduleReminder(context, reminder)
+                            Toast.makeText(context, "Reminder set for ${SavedSnippetsManager.formatDate(cal.timeInMillis)}", Toast.LENGTH_LONG).show()
+                        }
+                    }, cal.get(java.util.Calendar.HOUR_OF_DAY), cal.get(java.util.Calendar.MINUTE), false).show()
+                }, cal.get(java.util.Calendar.YEAR), cal.get(java.util.Calendar.MONTH), cal.get(java.util.Calendar.DAY_OF_MONTH)).show()
+            }
+            .show()
+    }
+
     private enum class ContentMode { TEXT, NUMBERS, LINKS, IMAGES }
     private enum class ResizeCorner { TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT }
     private enum class TextSelectionHandle { NONE, START, END }
@@ -1668,7 +1802,8 @@ object ScreenAnalysisOverlay {
         details: List<ScreenDetail>,
         screenshot: Bitmap?,
         textRegions: List<OcrTextItem>,
-        onRescan: () -> Unit
+        onRescan: () -> Unit,
+        sourcePackage: String? = null
     ): View {
         val density = context.resources.displayMetrics.density
         fun dp(value: Int) = (value * density).toInt()
@@ -1712,9 +1847,14 @@ object ScreenAnalysisOverlay {
             strokeWidth = 1.2f * density
         )
 
-        val actionBubbleLayout = LinearLayout(context).apply {
+        val actionMenuItems = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+        }
+        val actionBubbleLayout = HorizontalScrollView(context).apply {
+            isHorizontalScrollBarEnabled = true
+            isFillViewport = false
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = dp(12).toFloat()
@@ -1725,6 +1865,7 @@ object ScreenAnalysisOverlay {
             elevation = 0f
             outlineProvider = null
             visibility = View.GONE
+            addView(actionMenuItems, ViewGroup.LayoutParams(-2, -2))
         }
 
         
@@ -1757,7 +1898,7 @@ object ScreenAnalysisOverlay {
         }
 
         fun showActionMenu(targetRect: RectF, items: List<ActionBubbleItem>) {
-            actionBubbleLayout.removeAllViews()
+            actionMenuItems.removeAllViews()
 
             val appleAmber = Color.parseColor("#FFB300")
             items.forEachIndexed { index, item ->
@@ -1770,7 +1911,7 @@ object ScreenAnalysisOverlay {
                         leftMargin = dp(2)
                         rightMargin = dp(2)
                     }
-                    actionBubbleLayout.addView(divider, divParams)
+                    actionMenuItems.addView(divider, divParams)
                 }
 
                 val isPrimary = (index == 0)
@@ -1780,7 +1921,7 @@ object ScreenAnalysisOverlay {
                     typeface = if (isPrimary) satoshiBold else satoshiMedium
                     setTextColor(if (isPrimary) Color.BLACK else Color.WHITE)
                     gravity = Gravity.CENTER
-                    setPadding(dp(16), dp(8), dp(16), dp(8))
+                    setPadding(dp(10), dp(8), dp(10), dp(8))
                     if (isPrimary) {
                         background = GradientDrawable().apply {
                             shape = GradientDrawable.RECTANGLE
@@ -1802,11 +1943,11 @@ object ScreenAnalysisOverlay {
                         item.onClick()
                     }
                 }
-                actionBubbleLayout.addView(btn)
+                actionMenuItems.addView(btn)
             }
 
             actionBubbleLayout.measure(
-                View.MeasureSpec.makeMeasureSpec(screenW, View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(screenW - dp(24), View.MeasureSpec.AT_MOST),
                 View.MeasureSpec.makeMeasureSpec(screenH, View.MeasureSpec.AT_MOST)
             )
             val bubbleW = actionBubbleLayout.measuredWidth.coerceAtLeast(dp(120))
@@ -2103,7 +2244,6 @@ object ScreenAnalysisOverlay {
             private var downY = 0f
             private var isDraggingGesture = false
             private val gestureTrail = mutableListOf<GestureTrailNode>()
-            private val gesturePath = Path()
 
             private var cropChromaAnimator: ValueAnimator? = null
             private var cropRevealAlpha = 0f
@@ -2848,8 +2988,6 @@ object ScreenAnalysisOverlay {
                         activeResizeCorner = null
                         touchPoints.clear()
                         touchPoints.add(PointF(downX, downY))
-                        gesturePath.reset()
-                        gesturePath.moveTo(downX, downY)
                         isDraggingGesture = false
 
                         val now = System.currentTimeMillis()
@@ -2898,9 +3036,16 @@ object ScreenAnalysisOverlay {
                             return true
                         }
 
-                        touchPoints.add(PointF(cx, cy))
-                        gesturePath.lineTo(cx, cy)
-                        gestureTrail.add(GestureTrailNode(cx, cy, System.currentTimeMillis()))
+                        val lastTouch = touchPoints.lastOrNull()
+                        if (lastTouch == null || kotlin.math.hypot((cx - lastTouch.x).toDouble(), (cy - lastTouch.y).toDouble()) >= 3f * density) {
+                            if (touchPoints.size < 512) touchPoints.add(PointF(cx, cy))
+                            else touchPoints[touchPoints.lastIndex] = PointF(cx, cy)
+                        }
+                        val now = System.currentTimeMillis()
+                        if (gestureTrail.lastOrNull()?.let { now - it.time >= 16L } != false) {
+                            gestureTrail.add(GestureTrailNode(cx, cy, now))
+                            if (gestureTrail.size > 48) gestureTrail.removeAt(0)
+                        }
 
                         val dx = cx - downX
                         val dy = cy - downY
@@ -2953,6 +3098,9 @@ object ScreenAnalysisOverlay {
                                     saveCroppedImageToGallery(context, croppedBitmap)
                                     NothingGlyphController.stopGetContentGlyph()
                                     dismissWithAnimation()
+                                },
+                                ActionBubbleItem("Copy Text") {
+                                    copyTextFromCroppedBitmap(context, croppedBitmap)
                                 }
                             ))
                             IntegralAcoustics.playCropExtract(context)
@@ -2992,12 +3140,24 @@ object ScreenAnalysisOverlay {
                                     shareText(context, combined)
                                     NothingGlyphController.stopGetContentGlyph()
                                     dismissWithAnimation()
+                                },
+                                ActionBubbleItem("Save") {
+                                    SavedSnippetsManager.save(context, combined, sourcePackage)
+                                    Toast.makeText(context, "Snippet saved on this phone", Toast.LENGTH_SHORT).show()
+                                },
+                                ActionBubbleItem("Ask") {
+                                    showTextQuestionDialog(context, combined)
                                 }
                             ))
                             return true
                         }
 
-                        if (isDraggingGesture && touchPoints.size > 5) {
+                        if (isDraggingGesture && touchPoints.size > 1) {
+                            val lastPoint = touchPoints.lastOrNull()
+                            if (lastPoint == null || kotlin.math.hypot((event.x - lastPoint.x).toDouble(), (event.y - lastPoint.y).toDouble()) > 1f) {
+                                if (touchPoints.size < 512) touchPoints.add(PointF(event.x, event.y))
+                                else touchPoints[touchPoints.lastIndex] = PointF(event.x, event.y)
+                            }
                             var minX = Float.MAX_VALUE
                             var minY = Float.MAX_VALUE
                             var maxX = Float.MIN_VALUE
@@ -3010,9 +3170,22 @@ object ScreenAnalysisOverlay {
                             }
                             val w = maxX - minX
                             val h = maxY - minY
+                            val startPoint = touchPoints.first()
+                            val endPoint = touchPoints.last()
+                            val closedDistance = kotlin.math.hypot((endPoint.x - startPoint.x).toDouble(), (endPoint.y - startPoint.y).toDouble()).toFloat()
+                            var pathLength = 0f
+                            for (pointIndex in 1 until touchPoints.size) {
+                                val previous = touchPoints[pointIndex - 1]
+                                val current = touchPoints[pointIndex]
+                                pathLength += kotlin.math.hypot((current.x - previous.x).toDouble(), (current.y - previous.y).toDouble()).toFloat()
+                            }
+                            val chordLength = kotlin.math.hypot((endPoint.x - startPoint.x).toDouble(), (endPoint.y - startPoint.y).toDouble()).toFloat()
+                            val strokeCurvature = pathLength / chordLength.coerceAtLeast(8f * density)
+                            val isDrawnShape = minOf(w, h) > 48f * density &&
+                                (closedDistance < maxOf(36f * density, maxOf(w, h) * 0.34f) || strokeCurvature > 1.35f)
 
                             // User circled an area -> IDENTIFY AS IMAGE!
-                            if (w > 32f * density && h > 32f * density) {
+                            if (isDrawnShape) {
                                 activeTextRect = null
                                 selectedTargetItem = null
 
@@ -3074,13 +3247,19 @@ object ScreenAnalysisOverlay {
                                         saveCroppedImageToGallery(context, croppedBitmap)
                                         NothingGlyphController.stopGetContentGlyph()
                                         dismissWithAnimation()
+                                    },
+                                    ActionBubbleItem("Copy Text") {
+                                        copyTextFromCroppedBitmap(context, croppedBitmap)
                                     }
                                 ))
-                            } else if (w > 26f * density && h <= 32f * density) {
-                                // Horizontal swipe across text
+                            } else if (maxOf(w, h) > 26f * density) {
+                                // Open swipes select recognized words; if OCR has no word boxes,
+                                // use the same gesture bounds as a focused OCR crop.
                                 selectedCropRect = null
                                 selectedTargetItem = null
-                                val swipeRect = RectF(minX, minY, maxX, maxY)
+                                val paddingX = 18f * density
+                                val paddingY = 24f * density
+                                val swipeRect = RectF(minX - paddingX, minY - paddingY, maxX + paddingX, maxY + paddingY)
                                 val hitWords = activeTextRegions.filter { item ->
                                     val b = item.bounds
                                     val left = offX + b.left * scale
@@ -3118,13 +3297,27 @@ object ScreenAnalysisOverlay {
                                             shareText(context, combinedText)
                                             NothingGlyphController.stopGetContentGlyph()
                                             dismissWithAnimation()
+                                        },
+                                        ActionBubbleItem("Ask") {
+                                            showTextQuestionDialog(context, combinedText)
                                         }
                                     ))
+                                } else if (screenshot != null && !screenshot.isRecycled) {
+                                    val cropLeft = ((swipeRect.left - offX) / scale).toInt().coerceIn(0, screenshot.width - 1)
+                                    val cropTop = ((swipeRect.top - offY) / scale).toInt().coerceIn(0, screenshot.height - 1)
+                                    val cropRight = ((swipeRect.right - offX) / scale).toInt().coerceIn(cropLeft + 1, screenshot.width)
+                                    val cropBottom = ((swipeRect.bottom - offY) / scale).toInt().coerceIn(cropTop + 1, screenshot.height)
+                                    croppedBitmap = try {
+                                        Bitmap.createBitmap(screenshot, cropLeft, cropTop, cropRight - cropLeft, cropBottom - cropTop)
+                                    } catch (_: Exception) { null }
+                                    activeTextRect = swipeRect
+                                    showActionMenu(swipeRect, listOf(ActionBubbleItem("Copy Text") {
+                                        copyTextFromCroppedBitmap(context, croppedBitmap)
+                                    }))
                                 }
                             }
                             isDraggingGesture = false
                             gestureTrail.clear()
-                            gesturePath.reset()
                             invalidate()
                         } else {
                             // Single Tap -> Adaptive Automatic Target Identification
@@ -3260,6 +3453,10 @@ object ScreenAnalysisOverlay {
                                             Toast.makeText(context, "Copied: " + wordText, Toast.LENGTH_SHORT).show()
                                             NothingGlyphController.stopGetContentGlyph()
                                             dismissWithAnimation()
+                                        },
+                                        ActionBubbleItem("Save") {
+                                            SavedSnippetsManager.save(context, wordText, sourcePackage)
+                                            Toast.makeText(context, "Snippet saved on this phone", Toast.LENGTH_SHORT).show()
                                         },
                                         ActionBubbleItem("Search") {
                                             val intent = Intent(Intent.ACTION_WEB_SEARCH).apply {
@@ -3478,7 +3675,9 @@ object ScreenAnalysisOverlay {
                     setOnClickListener {
                         performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
                         IntegralAcoustics.playItemSelect(context)
-                        item.onPrimaryAction()
+                        if (item.category in setOf("Numbers", "Links", "Emails", "Address", "Events")) {
+                            showActionMenu(interactiveCanvas.toViewRectF(item.bounds), item.actions)
+                        } else item.onPrimaryAction()
                     }
                 }
                 addView(actionBtn)
@@ -3513,9 +3712,37 @@ object ScreenAnalysisOverlay {
         fun populateMiniCards() {
             miniCardsContainer.removeAllViews()
             val phoneItems = semanticResultItems.filter { it.category == "Numbers" }
-            val linkAndEventItems = semanticResultItems.filter { it.category in listOf("Events", "Links", "Emails", "Address") }
+            val linkAndEventItems = semanticResultItems.filter { it.category in listOf("Events", "Links", "Emails", "Address", "Details") }
+            val capturedText = activeDetails.firstOrNull { it.kind == "Screen text" }?.value
+                ?: ScreenContentAnalyzer.normalizeCapturedText(activeTextRegions.sortedWith(compareBy<OcrTextItem> { it.bounds.top }.thenBy { it.bounds.left }).joinToString(" ") { it.text })
 
-            if (phoneItems.isNotEmpty() || linkAndEventItems.isNotEmpty()) {
+            if (capturedText.isNotBlank()) {
+                val quickActions = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                quickActions.addView(pillButton(context, "ASK ABOUT TEXT", false) {
+                    showTextQuestionDialog(context, capturedText)
+                }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+                quickActions.addView(pillButton(context, "SAVE SNIPPET", false) {
+                    val saved = SavedSnippetsManager.save(context, capturedText, sourcePackage)
+                    Toast.makeText(context, if (saved != null) "Snippet saved on this phone" else "Nothing to save", Toast.LENGTH_SHORT).show()
+                }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+                quickActions.addView(pillButton(context, "SHARE TEXT", false) {
+                    shareText(context, capturedText)
+                })
+                quickActions.addView(pillButton(context, "SAVED", false) {
+                    showSavedSnippetsDialog(context)
+                }, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(8) })
+                val quickActionScroll = HorizontalScrollView(context).apply {
+                    isHorizontalScrollBarEnabled = false
+                    overScrollMode = View.OVER_SCROLL_NEVER
+                    addView(quickActions)
+                }
+                miniCardsContainer.addView(quickActionScroll, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+            }
+
+            if (phoneItems.isNotEmpty() || linkAndEventItems.isNotEmpty() || capturedText.isNotBlank()) {
                 miniCardsContainer.visibility = View.VISIBLE
                 // Row 1: Phone Numbers
                 if (phoneItems.isNotEmpty()) {
@@ -4020,6 +4247,13 @@ object ScreenAnalysisOverlay {
                                 NothingGlyphController.stopGetContentGlyph()
                                 dismissWithAnimation()
                             },
+                            ActionBubbleItem("Save") {
+                                SavedSnippetsManager.save(context, "${ev.title} · ${ev.dateSummary}", sourcePackage)
+                                Toast.makeText(context, "Snippet saved on this phone", Toast.LENGTH_SHORT).show()
+                            },
+                            ActionBubbleItem("Remind me") {
+                                reviewAndScheduleReminder(context, ev.title, ev.startMillis)
+                            },
                             ActionBubbleItem("Copy") {
                                 val clip = ClipData.newPlainText("Event", "${ev.title} on ${ev.dateSummary}")
                                 (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
@@ -4064,6 +4298,10 @@ object ScreenAnalysisOverlay {
                                 } catch (_: Exception) {}
                                 NothingGlyphController.stopGetContentGlyph()
                                 dismissWithAnimation()
+                            },
+                            ActionBubbleItem("Save") {
+                                SavedSnippetsManager.save(context, numStr, sourcePackage)
+                                Toast.makeText(context, "Snippet saved on this phone", Toast.LENGTH_SHORT).show()
                             },
                             ActionBubbleItem("Message") {
                                 try {
@@ -4122,6 +4360,10 @@ object ScreenAnalysisOverlay {
                                     NothingGlyphController.stopGetContentGlyph()
                                     dismissWithAnimation()
                                 },
+                                ActionBubbleItem("Save") {
+                                    SavedSnippetsManager.save(context, linkStr, sourcePackage)
+                                    Toast.makeText(context, "Snippet saved on this phone", Toast.LENGTH_SHORT).show()
+                                },
                                 ActionBubbleItem("Copy") {
                                     val clip = ClipData.newPlainText("Email", linkStr)
                                     (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
@@ -4169,6 +4411,10 @@ object ScreenAnalysisOverlay {
                                     } catch (_: Exception) {}
                                     NothingGlyphController.stopGetContentGlyph()
                                     dismissWithAnimation()
+                                },
+                                ActionBubbleItem("Save") {
+                                    SavedSnippetsManager.save(context, linkStr, sourcePackage)
+                                    Toast.makeText(context, "Snippet saved on this phone", Toast.LENGTH_SHORT).show()
                                 },
                                 ActionBubbleItem("Copy") {
                                     val clip = ClipData.newPlainText("Link", linkStr)
@@ -4223,6 +4469,10 @@ object ScreenAnalysisOverlay {
                                 NothingGlyphController.stopGetContentGlyph()
                                 dismissWithAnimation()
                             },
+                            ActionBubbleItem("Save") {
+                                SavedSnippetsManager.save(context, addrStr, sourcePackage)
+                                Toast.makeText(context, "Snippet saved on this phone", Toast.LENGTH_SHORT).show()
+                            },
                             ActionBubbleItem("Copy") {
                                 val clip = ClipData.newPlainText("Address", addrStr)
                                 (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
@@ -4239,6 +4489,33 @@ object ScreenAnalysisOverlay {
                     )
                 )
             }
+
+            // Surface OCR-extracted values that do not need a screen highlight to be useful.
+            activeDetails.filter { it.kind in setOf("Tracking number", "Price", "Date / time") }
+                .distinctBy { it.kind to it.value.lowercase(Locale.ROOT) }
+                .forEachIndexed { i, detail ->
+                    val value = detail.value
+                    val bounds = detail.bounds ?: Rect(screenW / 2, screenH / 2, screenW / 2 + 1, screenH / 2 + 1)
+                    val actions = mutableListOf(
+                        ActionBubbleItem("Copy") { copy(context, detail) },
+                        ActionBubbleItem("Share") { shareText(context, value) }
+                    )
+                    if (detail.kind == "Date / time") {
+                        actions.add(0, ActionBubbleItem("Remind me") {
+                            reviewAndScheduleReminder(context, "Reminder · $value", System.currentTimeMillis() + 60 * 60 * 1000L)
+                        })
+                    }
+                    semanticResultItems.add(SemanticResultItem(
+                        id = "detail_$i", category = "Details", iconType = "details",
+                        title = "$value", subtitle = detail.kind, bounds = bounds,
+                        primaryActionName = if (detail.kind == "Date / time") "Remind" else "Copy",
+                        onPrimaryAction = {
+                            if (detail.kind == "Date / time") reviewAndScheduleReminder(context, "Reminder · $value", System.currentTimeMillis() + 60 * 60 * 1000L)
+                            else copy(context, detail)
+                        },
+                        actions = actions
+                    ))
+                }
 
             // Update interactive canvas & bottom cards & badges
             (interactiveCanvas as? InteractiveContentCanvas)?.updateData(activeDetails, activeTextRegions)
@@ -4281,6 +4558,44 @@ object ScreenAnalysisOverlay {
         } catch (e: Exception) {
             e.printStackTrace()
             Toast.makeText(context, "Could not copy image: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun copyTextFromCroppedBitmap(context: Context, bitmap: Bitmap?) {
+        if (bitmap == null || bitmap.isRecycled) {
+            Toast.makeText(context, "Crop an area first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        try {
+            cropOcrExecutor.execute {
+                val ocrBitmap = try { OcrImagePreprocessor.prepare(bitmap, upscaleSmallText = true) } catch (_: Exception) { bitmap }
+                recognizer.process(InputImage.fromBitmap(ocrBitmap, 0))
+                .addOnSuccessListener { result ->
+                    val text = ScreenContentAnalyzer.normalizeCapturedText(result.text)
+                    if (text.isBlank()) {
+                        Toast.makeText(context, "No readable text found in this crop", Toast.LENGTH_SHORT).show()
+                    } else {
+                        val description = ClipDescription("Copied text from Badger", arrayOf(ClipDescription.MIMETYPE_TEXT_PLAIN))
+                        if (Build.VERSION.SDK_INT >= 33) {
+                            description.extras = PersistableBundle().apply { putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true) }
+                        }
+                        val clip = ClipData(description, ClipData.Item(text))
+                        (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
+                        Toast.makeText(context, "Text copied", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                .addOnFailureListener {
+                    Toast.makeText(context, "Could not read text from this crop", Toast.LENGTH_SHORT).show()
+                }
+                    .addOnCompleteListener {
+                        recognizer.close()
+                        if (ocrBitmap !== bitmap && !ocrBitmap.isRecycled) ocrBitmap.recycle()
+                    }
+            }
+        } catch (_: Exception) {
+            recognizer.close()
+            Toast.makeText(context, "Could not read text from this crop", Toast.LENGTH_SHORT).show()
         }
     }
 
